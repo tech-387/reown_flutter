@@ -955,13 +955,38 @@ class Pairing implements IPairing {
 
       if (pendingRequests.containsKey(response.id)) {
         final pendingRequest = pendingRequests[response.id]!;
-        if (response.error != null) {
-          pendingRequest.error = response.error;
-          pendingRequest.completer.completeError(response.error!);
-        } else {
-          pendingRequest.response = response.result;
-          pendingRequest.completer.complete(response.result);
+
+        // Some wallets (e.g. MetaMask) can publish a spurious, non-terminal
+        // error response for a request id (code 1 "Invalid Id", or -32002
+        // "already processing") while the request is still open and the
+        // real terminal response (approval/rejection) is yet to arrive.
+        // A Completer can only ever settle once, so blindly completing it
+        // here would permanently discard the real response that follows:
+        // it would find this same pendingRequests entry and try to
+        // complete the same, already-completed Completer again, which
+        // throws inside this fire-and-forget event handler and is lost
+        // with no way for any caller to observe it. Ignore these known
+        // non-terminal codes and keep the entry around for the response
+        // that actually settles the request.
+        if (response.error != null &&
+            _isNonTerminalPendingRequestErrorCode(response.error!.code)) {
+          core.logger.d(
+            '[$runtimeType] ignoring non-terminal response for pending '
+            'request, id: ${response.id}, code: ${response.error!.code}',
+          );
+          return;
         }
+
+        if (!pendingRequest.completer.isCompleted) {
+          if (response.error != null) {
+            pendingRequest.error = response.error;
+            pendingRequest.completer.completeError(response.error!);
+          } else {
+            pendingRequest.response = response.result;
+            pendingRequest.completer.complete(response.result);
+          }
+        }
+        pendingRequests.remove(response.id);
 
         if (isLinkMode) {
           // Send Event through Events SDK
@@ -979,6 +1004,12 @@ class Pairing implements IPairing {
         }
       }
     }
+  }
+
+  /// Error codes some wallets are known to send for a request id before its
+  /// real terminal response, without them actually ending the request.
+  bool _isNonTerminalPendingRequestErrorCode(int? code) {
+    return code == 1 || code == -32002;
   }
 
   bool _isSessionAuthRejectedError(String method, JsonRpcError? error) {
