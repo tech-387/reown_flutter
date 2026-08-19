@@ -509,6 +509,13 @@ class RelayClient implements IRelayClient {
     else {
       return null;
     }
+
+    // connect()/_connectingFuture may have failed silently (e.g. a transient
+    // DNS/network error caught inside _connect()), leaving jsonRPC null.
+    if (!isConnected) {
+      return null;
+    }
+
     return await jsonRPC!.sendRequest(method, parameters, id);
   }
 
