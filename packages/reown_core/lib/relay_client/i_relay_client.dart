@@ -52,3 +52,19 @@ abstract class IRelayClient {
 
   Future<void> disconnect();
 }
+
+/// Optional relay capability that reports whether publication was accepted.
+///
+/// It is separate from [IRelayClient] so existing custom relay implementations
+/// remain source-compatible.
+abstract interface class IAcknowledgedRelayClient {
+  /// Publishes [message] and waits for the relay's JSON-RPC acknowledgement.
+  ///
+  /// Returns `true` only for a successful relay acknowledgement. A `true`
+  /// result does not mean that a wallet received or answered the request.
+  Future<bool> publishAcknowledged({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+  });
+}

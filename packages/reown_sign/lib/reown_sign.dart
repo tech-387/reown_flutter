@@ -1,5 +1,7 @@
 library;
 
+export 'package:reown_core/reown_core.dart' show RelayRequestPublishedEvent;
+
 // models
 export 'models/proposal_models.dart';
 export 'models/session_models.dart';

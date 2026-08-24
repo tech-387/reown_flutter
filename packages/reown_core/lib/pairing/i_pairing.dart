@@ -15,6 +15,12 @@ abstract class IPairing {
   abstract final Event<PairingEvent> onPairingDelete;
   abstract final Event<PairingEvent> onPairingExpire;
 
+  /// Emits after the relay acknowledges a relay-mode [sendRequest].
+  ///
+  /// This does not mean the wallet received or answered the request. Link Mode
+  /// requests do not emit this event.
+  abstract final Event<RelayRequestPublishedEvent> onRelayRequestPublished;
+
   Future<void> init();
   Future<PairingInfo> pair({required Uri uri, bool activatePairing});
   Future<CreateResponse> create({

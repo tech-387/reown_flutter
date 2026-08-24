@@ -1531,6 +1531,22 @@ class MockRelayClient extends _i1.Mock implements _i33.RelayClient {
           as _i26.Future<void>);
 
   @override
+  _i26.Future<bool> publishAcknowledged({
+    required String? topic,
+    required String? message,
+    required _i36.PublishOptions? options,
+  }) =>
+      (super.noSuchMethod(
+            Invocation.method(#publishAcknowledged, [], {
+              #topic: topic,
+              #message: message,
+              #options: options,
+            }),
+            returnValue: _i26.Future<bool>.value(false),
+          )
+          as _i26.Future<bool>);
+
+  @override
   _i26.Future<void> publishPayload({
     required Map<String, dynamic>? payload,
     required _i36.PublishOptions? options,

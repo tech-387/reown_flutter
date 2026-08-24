@@ -15,6 +15,7 @@ import 'package:reown_core/pairing/i_pairing.dart';
 import 'package:reown_core/pairing/i_pairing_store.dart';
 import 'package:reown_core/pairing/utils/pairing_models.dart';
 import 'package:reown_core/pairing/utils/json_rpc_utils.dart';
+import 'package:reown_core/relay_client/i_relay_client.dart';
 import 'package:reown_core/relay_client/relay_client_models.dart';
 import 'package:reown_core/utils/utils.dart';
 import 'package:reown_core/models/uri_parse_result.dart';
@@ -54,6 +55,12 @@ class Pairing implements IPairing {
   final Event<PairingEvent> onPairingDelete = Event<PairingEvent>();
   @override
   final Event<PairingEvent> onPairingExpire = Event<PairingEvent>();
+
+  /// Emits after the relay acknowledges a relay-mode [sendRequest].
+  ///
+  /// It does not emit for Link Mode and does not mean the wallet responded.
+  @override
+  final Event<RelayRequestPublishedEvent> onRelayRequestPublished = Event();
 
   /// Stores all the pending requests
   Map<int, PendingRequestResponse> pendingRequests = {};
@@ -440,18 +447,60 @@ class Pairing implements IPairing {
       if (ttl != null) {
         opts = opts.copyWith(ttl: ttl);
       }
-      //
-      await core.relayClient.publish(
-        topic: topic,
-        message: message,
-        options: PublishOptions(
-          ttl: ttl ?? opts.ttl,
-          tag: opts.tag,
-          correlationId: requestId,
-          // tvf data is sent only on tvfMethods methods
-          tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
-        ),
+
+      final publishOptions = PublishOptions(
+        ttl: ttl ?? opts.ttl,
+        tag: opts.tag,
+        correlationId: requestId,
+        // tvf data is sent only on tvfMethods methods
+        tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
       );
+      final relayClient = core.relayClient;
+      if (relayClient is IAcknowledgedRelayClient) {
+        final acknowledgedRelayClient = relayClient as IAcknowledgedRelayClient;
+        late final bool published;
+        try {
+          published = await acknowledgedRelayClient.publishAcknowledged(
+            topic: topic,
+            message: message,
+            options: publishOptions,
+          );
+        } catch (_) {
+          pendingRequests.remove(requestId);
+          rethrow;
+        }
+        if (!published) {
+          pendingRequests.remove(requestId);
+          throw const ReownCoreError(
+            code: -1,
+            message: 'Relay publication was not acknowledged.',
+          );
+        }
+
+        // Listener code must not make an already-published request fail.
+        try {
+          onRelayRequestPublished.broadcast(
+            RelayRequestPublishedEvent(
+              requestId: requestId,
+              topic: topic,
+              method: method,
+            ),
+          );
+        } catch (error, stackTrace) {
+          core.logger.e(
+            '[$runtimeType] onRelayRequestPublished listener failed',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      } else {
+        // Custom legacy relay clients cannot report a positive relay ACK.
+        await relayClient.publish(
+          topic: topic,
+          message: message,
+          options: publishOptions,
+        );
+      }
       core.logger.d(
         '[$runtimeType] sendRequest relayClient, '
         'id: $requestId topic: $topic, method: $method, '

@@ -132,6 +132,27 @@ class PairingActivateEvent extends EventArgs {
   }
 }
 
+/// Identifies a relay-mode request that the relay accepted for publication.
+///
+/// This is not a wallet receipt or wallet response. It intentionally contains
+/// only correlation metadata and never includes request parameters or payloads.
+class RelayRequestPublishedEvent extends EventArgs {
+  /// The JSON-RPC identifier assigned to the pairing request.
+  final int requestId;
+
+  /// The WalletConnect topic on which the request was published.
+  final String topic;
+
+  /// The WalletConnect method associated with the request.
+  final String method;
+
+  RelayRequestPublishedEvent({
+    required this.requestId,
+    required this.topic,
+    required this.method,
+  });
+}
+
 @freezed
 sealed class JsonRpcRecord with _$JsonRpcRecord {
   @JsonSerializable(includeIfNull: false)

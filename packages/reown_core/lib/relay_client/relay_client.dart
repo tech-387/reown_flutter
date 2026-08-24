@@ -18,7 +18,7 @@ import 'package:reown_core/utils/constants.dart';
 import 'package:reown_core/utils/errors.dart';
 import 'package:reown_core/version.dart';
 
-class RelayClient implements IRelayClient {
+class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
   static const IRN_PUBLISH = 'publish';
   static const IRN_SUBSCRIPTION = 'subscription';
   static const IRN_SUBSCRIBE = 'subscribe';
@@ -114,6 +114,19 @@ class RelayClient implements IRelayClient {
     required String message,
     required PublishOptions options,
   }) async {
+    await publishAcknowledged(topic: topic, message: message, options: options);
+  }
+
+  /// Publishes a relay message and waits for the relay acknowledgement.
+  ///
+  /// Returns `true` only when the relay positively acknowledges `irn_publish`.
+  /// This does not mean that the wallet received or answered the request.
+  @override
+  Future<bool> publishAcknowledged({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+  }) async {
     _checkInitialized();
 
     final Map<String, dynamic> parameters = {
@@ -126,14 +139,16 @@ class RelayClient implements IRelayClient {
 
     try {
       await messageTracker.recordMessageEvent(topic, message);
-      final _ = await _sendJsonRpcRequest(
+      final result = await _sendJsonRpcRequest(
         id: JsonRpcUtils.payloadId(entropy: 6),
         method: _buildIRNMethod(IRN_PUBLISH),
         parameters: parameters,
       );
+      return result == true;
     } catch (e, s) {
       core.logger.e('[$runtimeType], publish: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
+      return false;
     }
   }
 
