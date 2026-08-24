@@ -627,7 +627,11 @@ class Pairing implements IPairing {
     );
 
     if (message == null) {
-      return;
+      if (method != MethodConstants.WC_SESSION_EVENT) return;
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Failed to encode relay response.',
+      );
     }
 
     if (isLinkMode) {
@@ -652,7 +656,7 @@ class Pairing implements IPairing {
     } else {
       final opts = MethodConstants.RPC_OPTS[method]!['res']!;
       //
-      await core.relayClient.publish(
+      await _publishRelayResponse(
         topic: topic,
         message: message,
         options: PublishOptions(
@@ -662,6 +666,7 @@ class Pairing implements IPairing {
           // tvf data is sent only on tvfMethods methods
           tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson(includeAll: true) : null,
         ),
+        requireAcknowledgement: method == MethodConstants.WC_SESSION_EVENT,
       );
       core.logger.d(
         '[$runtimeType] sendResult relayClient, '
@@ -772,7 +777,11 @@ class Pairing implements IPairing {
     );
 
     if (message == null) {
-      return;
+      if (method != MethodConstants.WC_SESSION_EVENT) return;
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Failed to encode relay error response.',
+      );
     }
 
     if (isLinkMode) {
@@ -804,7 +813,7 @@ class Pairing implements IPairing {
       final ttl = (rpcOptions ?? fallbackOpts).ttl;
       final tag = (rpcOptions ?? fallbackOpts).tag;
       //
-      await core.relayClient.publish(
+      await _publishRelayResponse(
         topic: topic,
         message: message,
         options: PublishOptions(
@@ -814,6 +823,7 @@ class Pairing implements IPairing {
           // tvf data is sent only on tvfMethods methods
           tvf: _shouldSendTVF(tag) ? tvf?.toJson(includeAll: true) : null,
         ),
+        requireAcknowledgement: method == MethodConstants.WC_SESSION_EVENT,
       );
       core.logger.d(
         '[$runtimeType] sendError relayClient, '
@@ -978,12 +988,20 @@ class Pairing implements IPairing {
       final request = JsonRpcRequest.fromJson(data);
 
       if (routerMapRequest.containsKey(request.method)) {
-        routerMapRequest[request.method]!.function(
-          event.topic,
-          request,
-          event.attestation,
-          event.transportType,
-        );
+        try {
+          await routerMapRequest[request.method]!.function(
+            event.topic,
+            request,
+            event.attestation,
+            event.transportType,
+          );
+        } catch (error, stackTrace) {
+          core.logger.e(
+            '[$runtimeType] request handler failed, method: '
+            '${request.method}, errorType: ${error.runtimeType}',
+            stackTrace: stackTrace,
+          );
+        }
       } else {
         _onUnkownRpcMethodRequest(event.topic, request);
       }
@@ -1067,6 +1085,37 @@ class Pairing implements IPairing {
         method == MethodConstants.WC_SESSION_AUTHENTICATE &&
         (errorCode == 12001 || (errorCode >= 5000 && errorCode <= 5003));
     return sessionRejected;
+  }
+
+  Future<void> _publishRelayResponse({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+    required bool requireAcknowledgement,
+  }) async {
+    final relayClient = core.relayClient;
+    if (requireAcknowledgement) {
+      if (relayClient is! IAcknowledgedRelayClient) {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay client cannot acknowledge response publication.',
+        );
+      }
+      final acknowledgedRelayClient = relayClient as IAcknowledgedRelayClient;
+      final published = await acknowledgedRelayClient.publishAcknowledged(
+        topic: topic,
+        message: message,
+        options: options,
+      );
+      if (!published) {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay response publication was not acknowledged.',
+        );
+      }
+      return;
+    }
+    await relayClient.publish(topic: topic, message: message, options: options);
   }
 
   Future<void> _onPairingPingRequest(

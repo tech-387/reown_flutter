@@ -19,6 +19,20 @@ import 'package:reown_sign/utils/sign_api_validator_utils.dart';
 import 'package:reown_sign/utils/recaps_utils.dart';
 import 'package:reown_sign/utils/constants.dart';
 
+typedef _SessionEventRequestKey = ({String topic, int id, String method});
+
+final class _SessionEventResolution {
+  final SessionEvent? event;
+  final JsonRpcError? error;
+  bool eventBroadcast = false;
+
+  _SessionEventResolution.accepted(this.event) : error = null;
+
+  _SessionEventResolution.rejected(this.error) : event = null;
+
+  bool get isAccepted => error == null;
+}
+
 class ReownSign implements IReownSign {
   static const List<List<String>> DEFAULT_METHODS = [
     [MethodConstants.WC_SESSION_PROPOSE, MethodConstants.WC_SESSION_REQUEST],
@@ -596,6 +610,12 @@ class ReownSign implements IReownSign {
 
   /// Maps a request using chainId:event to its handler
   final Map<String, dynamic Function(String, dynamic)?> _eventHandlers = {};
+  static const Duration _sessionEventReplayWindow = Duration(
+    seconds: ReownConstants.FIVE_MINUTES,
+  );
+  final Map<_SessionEventRequestKey, Future<_SessionEventResolution>>
+  _sessionEventResolutions = {};
+  final Map<_SessionEventRequestKey, DateTime> _sessionEventResolvedAt = {};
 
   @override
   void registerEventHandler({
@@ -829,6 +849,16 @@ class ReownSign implements IReownSign {
 
   String _getRegisterKey(String chainId, String value) {
     return '$chainId:$value';
+  }
+
+  String _safeSessionEventLogKey(String? value) {
+    final candidate = value?.trim();
+    if (candidate == null ||
+        candidate.length > 192 ||
+        !RegExp(r'^[A-Za-z0-9:._-]+$').hasMatch(candidate)) {
+      return 'unavailable';
+    }
+    return candidate;
   }
 
   Future<void> _deleteSession(
@@ -1368,64 +1398,162 @@ class ReownSign implements IReownSign {
     __,
     _,
   ]) async {
+    _removeExpiredSessionEventResolutions();
+    final key = (topic: topic, id: payload.id, method: payload.method);
+    final existingResolution = _sessionEventResolutions[key];
+    final ownsResolution = existingResolution == null;
+    final resolutionFuture =
+        existingResolution ??
+        _resolveSessionEventRequest(topic: topic, payload: payload);
+    if (ownsResolution) {
+      _sessionEventResolutions[key] = resolutionFuture;
+    } else {
+      core.logger.d(
+        '[$runtimeType] replaying duplicate session event response, '
+        'id: ${payload.id}',
+      );
+    }
+
+    final resolution = await resolutionFuture;
+    if (ownsResolution) {
+      _sessionEventResolvedAt[key] = DateTime.now();
+    }
+    final published = await _publishSessionEventResolution(
+      topic: topic,
+      payload: payload,
+      resolution: resolution,
+    );
+    if (published && resolution.isAccepted && !resolution.eventBroadcast) {
+      resolution.eventBroadcast = true;
+      _broadcastSessionEventSafely(resolution.event!);
+    }
+  }
+
+  Future<_SessionEventResolution> _resolveSessionEventRequest({
+    required String topic,
+    required JsonRpcRequest payload,
+  }) async {
+    String? eventKey;
     try {
       final request = WcSessionEventRequest.fromJson(payload.params);
       final SessionEventParams event = request.event;
+      eventKey = _getRegisterKey(request.chainId, request.event.name);
       await _isValidEmit(topic, event, request.chainId);
 
-      final String eventKey = _getRegisterKey(
-        request.chainId,
-        request.event.name,
-      );
-      if (_eventHandlers.containsKey(eventKey)) {
-        final handler = _methodHandlers[eventKey];
-        if (handler != null) {
-          final handler = _eventHandlers[eventKey]!;
-          try {
-            await handler(topic, event.data);
-          } catch (err) {
-            await core.pairing.sendError(
-              payload.id,
-              topic,
-              payload.method,
-              JsonRpcError.invalidParams(err.toString()),
-            );
-          }
-        }
-
-        await core.pairing.sendResult(
-          payload.id,
-          topic,
-          MethodConstants.WC_SESSION_REQUEST,
-          true,
+      if (!_eventHandlers.containsKey(eventKey)) {
+        core.logger.d(
+          '[$runtimeType] rejecting unregistered session event, '
+          'eventKey: ${_safeSessionEventLogKey(eventKey)}',
         );
-
-        onSessionEvent.broadcast(
-          SessionEvent(
-            payload.id,
-            topic,
-            event.name,
-            request.chainId,
-            event.data,
-          ),
-        );
-      } else {
-        await core.pairing.sendError(
-          payload.id,
-          topic,
-          payload.method,
+        return _SessionEventResolution.rejected(
           JsonRpcError.methodNotFound(
             'No handler found for chainId:event -> $eventKey',
           ),
         );
       }
+
+      final handler = _eventHandlers[eventKey];
+      if (handler != null) {
+        try {
+          await handler(topic, event.data);
+        } catch (error, stackTrace) {
+          core.logger.e(
+            '[$runtimeType] session event handler failed, '
+            'eventKey: ${_safeSessionEventLogKey(eventKey)}, '
+            'errorType: ${error.runtimeType}',
+            stackTrace: stackTrace,
+          );
+          return _SessionEventResolution.rejected(
+            JsonRpcError.invalidParams('Session event handler rejected event.'),
+          );
+        }
+      }
+
+      return _SessionEventResolution.accepted(
+        SessionEvent(
+          payload.id,
+          topic,
+          event.name,
+          request.chainId,
+          event.data,
+        ),
+      );
     } on ReownSignError catch (err) {
-      await core.pairing.sendError(
-        payload.id,
-        topic,
-        payload.method,
+      core.logger.d(
+        '[$runtimeType] rejecting invalid session event, '
+        'eventKey: ${_safeSessionEventLogKey(eventKey)}, '
+        'errorCode: ${err.code}',
+      );
+      return _SessionEventResolution.rejected(
         JsonRpcError.invalidParams(err.message),
       );
+    } catch (error, stackTrace) {
+      core.logger.e(
+        '[$runtimeType] rejecting malformed session event, '
+        'eventKey: ${_safeSessionEventLogKey(eventKey)}, '
+        'errorType: ${error.runtimeType}',
+        stackTrace: stackTrace,
+      );
+      return _SessionEventResolution.rejected(
+        JsonRpcError.invalidParams('Invalid session event parameters.'),
+      );
+    }
+  }
+
+  Future<bool> _publishSessionEventResolution({
+    required String topic,
+    required JsonRpcRequest payload,
+    required _SessionEventResolution resolution,
+  }) async {
+    try {
+      if (resolution.isAccepted) {
+        await core.pairing.sendResult(
+          payload.id,
+          topic,
+          MethodConstants.WC_SESSION_EVENT,
+          true,
+        );
+      } else {
+        await core.pairing.sendError(
+          payload.id,
+          topic,
+          MethodConstants.WC_SESSION_EVENT,
+          resolution.error!,
+        );
+      }
+      return true;
+    } catch (error, stackTrace) {
+      core.logger.e(
+        '[$runtimeType] session event response publication failed, '
+        'id: ${payload.id}, outcome: '
+        '${resolution.isAccepted ? 'accepted' : 'rejected'}, '
+        'errorType: ${error.runtimeType}',
+        stackTrace: stackTrace,
+      );
+      return false;
+    }
+  }
+
+  void _broadcastSessionEventSafely(SessionEvent event) {
+    runZonedGuarded<void>(
+      () => onSessionEvent.broadcast(event),
+      (error, stackTrace) => core.logger.e(
+        '[$runtimeType] onSessionEvent listener failed, '
+        'errorType: ${error.runtimeType}',
+        stackTrace: stackTrace,
+      ),
+    );
+  }
+
+  void _removeExpiredSessionEventResolutions() {
+    final cutoff = DateTime.now().subtract(_sessionEventReplayWindow);
+    final expiredKeys = _sessionEventResolvedAt.entries
+        .where((entry) => entry.value.isBefore(cutoff))
+        .map((entry) => entry.key)
+        .toList(growable: false);
+    for (final key in expiredKeys) {
+      _sessionEventResolvedAt.remove(key);
+      _sessionEventResolutions.remove(key);
     }
   }
 
