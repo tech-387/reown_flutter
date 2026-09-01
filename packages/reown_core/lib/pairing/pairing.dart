@@ -67,6 +67,7 @@ class Pairing implements IPairing {
   /// Stores all the pending requests
   Map<int, PendingRequestResponse> pendingRequests = {};
 
+  final Map<int, String> _publicationOnlyRequests = {};
   final Map<String, Completer<void>> _pendingResponseWaiters = {};
   final Set<String> _retiringResponseTopics = {};
 
@@ -534,6 +535,63 @@ class Pairing implements IPairing {
     }
   }
 
+  @override
+  Future<void> publishRequestAcknowledged(
+    String topic,
+    String method,
+    Map<String, dynamic> params,
+  ) async {
+    late int requestId;
+    do {
+      requestId = JsonRpcUtils.payloadId();
+    } while (pendingRequests.containsKey(requestId) ||
+        _publicationOnlyRequests.containsKey(requestId));
+    _publicationOnlyRequests[requestId] = topic;
+
+    try {
+      final payload = JsonRpcUtils.formatJsonRpcRequest(
+        method,
+        params,
+        id: requestId,
+      );
+      final message = await core.crypto.encode(topic, payload);
+      if (message == null) {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Failed to encode relay request.',
+        );
+      }
+
+      final opts = MethodConstants.RPC_OPTS[method]!['req']!;
+      final relayClient = core.relayClient;
+      if (relayClient is! IAcknowledgedRelayClient) {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay client cannot acknowledge request publication.',
+        );
+      }
+      final acknowledgedRelayClient = relayClient as IAcknowledgedRelayClient;
+      final published = await acknowledgedRelayClient.publishAcknowledged(
+        topic: topic,
+        message: message,
+        options: PublishOptions(
+          ttl: opts.ttl,
+          tag: opts.tag,
+          correlationId: requestId,
+        ),
+      );
+      if (!published) {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay request publication was not acknowledged.',
+        );
+      }
+    } catch (_) {
+      _publicationOnlyRequests.remove(requestId);
+      rethrow;
+    }
+  }
+
   PendingRequestResponse _registerPendingResponse({
     required String topic,
     required int requestId,
@@ -544,6 +602,12 @@ class Pairing implements IPairing {
       throw const ReownCoreError(
         code: -1,
         message: 'Response topic teardown has already started.',
+      );
+    }
+    if (_publicationOnlyRequests.containsKey(requestId)) {
+      throw ReownCoreError(
+        code: -1,
+        message: 'Request identity conflict for request $requestId.',
       );
     }
     final existing = pendingRequests[requestId];
@@ -596,6 +660,9 @@ class Pairing implements IPairing {
   bool tryBeginResponseTopicTeardown({required String topic}) {
     if (hasPendingResponse(topic: topic)) return false;
     _retiringResponseTopics.add(topic);
+    _publicationOnlyRequests.removeWhere(
+      (_, requestTopic) => requestTopic == topic,
+    );
     return true;
   }
 

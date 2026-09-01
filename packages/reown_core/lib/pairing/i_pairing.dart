@@ -63,6 +63,15 @@ abstract class IPairing {
     TVFData? tvf,
   });
 
+  /// Publishes a relay request after positive relay acknowledgement.
+  ///
+  /// This does not register or await a response.
+  Future<void> publishRequestAcknowledged(
+    String topic,
+    String method,
+    Map<String, dynamic> params,
+  );
+
   /// Restores the response waiter for an already-published request.
   ///
   /// This never publishes a request. Calling it repeatedly for the same topic,

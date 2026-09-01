@@ -692,19 +692,16 @@ class ReownSign implements IReownSign {
       await _isValidDisconnect(topic);
 
       if (sessions.has(topic)) {
-        // Send the request to delete the session, we don't care if it fails
-        try {
-          final deleteRequest = WcSessionDeleteRequest(
-            code: reason.code,
-            message: reason.message,
-            data: reason.data,
-          );
-          core.pairing.sendRequest(
-            topic,
-            MethodConstants.WC_SESSION_DELETE,
-            deleteRequest.toJson(),
-          );
-        } catch (_) {}
+        final deleteRequest = WcSessionDeleteRequest(
+          code: reason.code,
+          message: reason.message,
+          data: reason.data,
+        );
+        await core.pairing.publishRequestAcknowledged(
+          topic,
+          MethodConstants.WC_SESSION_DELETE,
+          deleteRequest.toJson(),
+        );
 
         await _deleteSession(topic);
       } else {
