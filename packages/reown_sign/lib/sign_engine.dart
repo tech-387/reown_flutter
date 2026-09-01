@@ -1015,11 +1015,12 @@ class ReownSign implements IReownSign {
       }
     }
 
-    sessionTopics.map((topic) async {
-      // print('deleting expired session $topic');
+    for (final topic in sessionTopics) {
       await _deleteSession(topic);
-    });
-    proposalIds.map((id) async => await _deleteProposal(id));
+    }
+    for (final id in proposalIds) {
+      await _deleteProposal(id);
+    }
   }
 
   /// ---- Relay Events ---- ///
