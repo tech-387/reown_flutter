@@ -63,6 +63,38 @@ abstract class IPairing {
     TVFData? tvf,
   });
 
+  /// Restores the response waiter for an already-published request.
+  ///
+  /// This never publishes a request. Calling it repeatedly for the same topic,
+  /// request ID, and method returns the same response future. A conflicting
+  /// request identity throws instead of attaching to the wrong response.
+  Future<dynamic> restorePendingResponse({
+    required String topic,
+    required int requestId,
+    required String method,
+  });
+
+  /// Returns valid JSON-RPC envelopes recorded for [topic].
+  ///
+  /// Storage access and decryption stay inside Reown. Invalid or undecryptable
+  /// history entries are logged and omitted without blocking valid entries.
+  Future<List<Map<String, dynamic>>> getDecodedMessageHistory({
+    required String topic,
+  });
+
+  /// Whether a peer error proves that its pending request has settled.
+  bool isTerminalPendingResponseError(JsonRpcError error);
+
+  /// Removes only the pending response waiter matching the exact request.
+  ///
+  /// This does not cancel or publish anything. It is intended for callers that
+  /// have independently proved the original request terminal.
+  bool forgetPendingResponse({
+    required String topic,
+    required int requestId,
+    required String method,
+  });
+
   Future<dynamic> sendProposeSessionRequest(
     String topic,
     Map<String, dynamic> params, {

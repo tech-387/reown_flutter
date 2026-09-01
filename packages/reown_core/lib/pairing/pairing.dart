@@ -26,12 +26,14 @@ import 'package:reown_core/utils/method_constants.dart';
 
 class PendingRequestResponse {
   Completer completer;
+  String topic;
   String method;
   dynamic response;
   JsonRpcError? error;
 
   PendingRequestResponse({
     required this.completer,
+    required this.topic,
     required this.method,
     this.response,
     this.error,
@@ -408,7 +410,12 @@ class Pairing implements IPairing {
     }
 
     // print('adding payload to pending requests: $requestId');
-    final resp = PendingRequestResponse(completer: Completer(), method: method);
+    final resp = _registerPendingResponse(
+      topic: topic,
+      requestId: requestId,
+      method: method,
+      reuseExact: false,
+    );
     resp.completer.future.catchError(
       (err) => core.events.recordEvent(
         BasicCoreEvent(
@@ -417,7 +424,6 @@ class Pairing implements IPairing {
         ),
       ),
     );
-    pendingRequests[requestId] = resp;
 
     if (isLinkMode) {
       // during wc_sessionAuthenticate we don't need to openURL as it will be done by the host dapp
@@ -525,6 +531,113 @@ class Pairing implements IPairing {
     }
   }
 
+  PendingRequestResponse _registerPendingResponse({
+    required String topic,
+    required int requestId,
+    required String method,
+    required bool reuseExact,
+  }) {
+    final existing = pendingRequests[requestId];
+    if (existing != null) {
+      if (reuseExact && existing.topic == topic && existing.method == method) {
+        return existing;
+      }
+      throw ReownCoreError(
+        code: -1,
+        message: 'Pending response identity conflict for request $requestId.',
+      );
+    }
+
+    final pending = PendingRequestResponse(
+      completer: Completer(),
+      topic: topic,
+      method: method,
+    );
+    pendingRequests[requestId] = pending;
+    return pending;
+  }
+
+  @override
+  Future<dynamic> restorePendingResponse({
+    required String topic,
+    required int requestId,
+    required String method,
+  }) {
+    return _registerPendingResponse(
+      topic: topic,
+      requestId: requestId,
+      method: method,
+      reuseExact: true,
+    ).completer.future;
+  }
+
+  @override
+  Future<List<Map<String, dynamic>>> getDecodedMessageHistory({
+    required String topic,
+  }) async {
+    final relay = core.relayClient;
+    if (relay is! RelayClient) {
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Relay message history is unavailable.',
+      );
+    }
+
+    await core.storage.init();
+    await core.secureStorage.init();
+    await core.crypto.init();
+    await relay.messageTracker.init();
+
+    final messages = List<String>.of(
+      relay.messageTracker.get(topic)?.values ?? const <String>[],
+      growable: false,
+    );
+    final history = <Map<String, dynamic>>[];
+    for (final message in messages) {
+      try {
+        final payload = await core.crypto.decode(topic, message);
+        if (payload == null) {
+          core.logger.e(
+            '[$runtimeType] recorded message decryption returned no payload',
+          );
+          continue;
+        }
+        final decoded = jsonDecode(payload);
+        if (decoded is Map) {
+          history.add(Map<String, dynamic>.from(decoded));
+        }
+      } catch (error, stackTrace) {
+        core.logger.e(
+          '[$runtimeType] failed to decode recorded message',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+    return List.unmodifiable(history);
+  }
+
+  @override
+  bool isTerminalPendingResponseError(JsonRpcError error) {
+    return error.code != 1 && error.code != -32002;
+  }
+
+  @override
+  bool forgetPendingResponse({
+    required String topic,
+    required int requestId,
+    required String method,
+  }) {
+    final existing = pendingRequests[requestId];
+    if (existing == null ||
+        existing.topic != topic ||
+        existing.method != method) {
+      return false;
+    }
+    pendingRequests.remove(requestId);
+    return true;
+  }
+
   ///
   /// Sign 2.5
   /// Substitutes wc_sessionPropose sendRequest()
@@ -555,9 +668,11 @@ class Pairing implements IPairing {
     }
 
     // print('adding payload to pending requests: $requestId');
-    final resp = PendingRequestResponse(
-      completer: Completer(),
+    final resp = _registerPendingResponse(
+      topic: topic,
+      requestId: requestId,
       method: MethodConstants.WC_SESSION_PROPOSE,
+      reuseExact: false,
     );
     resp.completer.future.catchError(
       (err) => core.events.recordEvent(
@@ -567,7 +682,6 @@ class Pairing implements IPairing {
         ),
       ),
     );
-    pendingRequests[requestId] = resp;
 
     final payload = {
       'pairingTopic': topic,
@@ -1022,6 +1136,13 @@ class Pairing implements IPairing {
 
       if (pendingRequests.containsKey(response.id)) {
         final pendingRequest = pendingRequests[response.id]!;
+        if (pendingRequest.topic != event.topic) {
+          core.logger.d(
+            '[$runtimeType] ignoring response with mismatched topic for '
+            'pending request, id: ${response.id}',
+          );
+          return;
+        }
 
         // Some wallets (e.g. MetaMask) can publish a spurious, non-terminal
         // error response for a request id (code 1 "Invalid Id", or -32002
@@ -1036,7 +1157,7 @@ class Pairing implements IPairing {
         // non-terminal codes and keep the entry around for the response
         // that actually settles the request.
         if (response.error != null &&
-            _isNonTerminalPendingRequestErrorCode(response.error!.code)) {
+            !isTerminalPendingResponseError(response.error!)) {
           core.logger.d(
             '[$runtimeType] ignoring non-terminal response for pending '
             'request, id: ${response.id}, code: ${response.error!.code}',
@@ -1071,12 +1192,6 @@ class Pairing implements IPairing {
         }
       }
     }
-  }
-
-  /// Error codes some wallets are known to send for a request id before its
-  /// real terminal response, without them actually ending the request.
-  bool _isNonTerminalPendingRequestErrorCode(int? code) {
-    return code == 1 || code == -32002;
   }
 
   bool _isSessionAuthRejectedError(String method, JsonRpcError? error) {
