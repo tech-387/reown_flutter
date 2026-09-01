@@ -8,6 +8,7 @@ import 'package:flutter/foundation.dart';
 import 'package:reown_core/models/tvf_data.dart';
 import 'package:reown_core/pairing/utils/json_rpc_utils.dart';
 import 'package:reown_core/reown_core.dart';
+import 'package:reown_core/store/generic_store.dart';
 import 'package:reown_core/store/i_generic_store.dart';
 import 'package:reown_core/utils/algorand_utils.dart';
 import 'package:reown_core/utils/near_utils.dart';
@@ -92,6 +93,9 @@ class ReownSign implements IReownSign {
   @override
   late IGenericStore<String> pairingTopics;
 
+  late final GenericStore<String> _pendingSessionDeletions;
+  final Map<String, Future<void>> _sessionDeletionOperations = {};
+
   // NEW 1-CA METHOD
   @override
   late IGenericStore<PendingSessionAuthRequest> sessionAuthRequests;
@@ -113,7 +117,14 @@ class ReownSign implements IReownSign {
     required this.sessionAuthRequests,
     required this.authKeys,
     required this.pairingTopics,
-  });
+  }) {
+    _pendingSessionDeletions = GenericStore(
+      storage: core.storage,
+      context: StoreVersions.CONTEXT_PENDING_SESSION_DELETIONS,
+      version: StoreVersions.VERSION_PENDING_SESSION_DELETIONS,
+      fromJson: (dynamic value) => value as String,
+    );
+  }
 
   @override
   Future<void> init() async {
@@ -129,9 +140,13 @@ class ReownSign implements IReownSign {
     await sessionAuthRequests.init();
     await authKeys.init();
     await pairingTopics.init();
+    await _pendingSessionDeletions.init();
 
     _registerInternalEvents();
     _registerRelayClientFunctions();
+    for (final topic in _pendingSessionDeletions.data.keys.toList()) {
+      await _deleteSession(topic);
+    }
     await _cleanup();
 
     await _resubscribeAll();
@@ -709,12 +724,14 @@ class ReownSign implements IReownSign {
     required Map<String, RequiredNamespace> requiredNamespaces,
   }) {
     _checkInitialized();
-    final compatible = sessions.getAll().where((element) {
-      return SignApiValidatorUtils.isSessionCompatible(
-        session: element,
-        requiredNamespaces: requiredNamespaces,
-      );
-    });
+    final compatible = sessions.getAll().where(
+      (session) =>
+          !_pendingSessionDeletions.has(session.topic) &&
+          SignApiValidatorUtils.isSessionCompatible(
+            session: session,
+            requiredNamespaces: requiredNamespaces,
+          ),
+    );
 
     return compatible.isNotEmpty ? compatible.first : null;
   }
@@ -724,9 +741,12 @@ class ReownSign implements IReownSign {
     _checkInitialized();
 
     Map<String, SessionData> activeSessions = {};
-    sessions.getAll().forEach((session) {
-      activeSessions[session.topic] = session;
-    });
+    sessions
+        .getAll()
+        .where((session) => !_pendingSessionDeletions.has(session.topic))
+        .forEach((session) {
+          activeSessions[session.topic] = session;
+        });
 
     return activeSessions;
   }
@@ -740,7 +760,11 @@ class ReownSign implements IReownSign {
     Map<String, SessionData> pairingSessions = {};
     sessions
         .getAll()
-        .where((session) => session.pairingTopic == pairingTopic)
+        .where(
+          (session) =>
+              session.pairingTopic == pairingTopic &&
+              !_pendingSessionDeletions.has(session.topic),
+        )
         .forEach((session) {
           pairingSessions[session.topic] = session;
         });
@@ -861,25 +885,85 @@ class ReownSign implements IReownSign {
     return candidate;
   }
 
-  Future<void> _deleteSession(
+  Future<void> _deleteSession(String topic, {bool expirerHasDeleted = false}) {
+    final active = _sessionDeletionOperations[topic];
+    if (active != null) return active;
+
+    late final Future<void> operation;
+    operation = _deleteSessionOnce(topic, expirerHasDeleted: expirerHasDeleted)
+        .whenComplete(() {
+          if (identical(_sessionDeletionOperations[topic], operation)) {
+            _sessionDeletionOperations.remove(topic);
+          }
+        });
+    _sessionDeletionOperations[topic] = operation;
+    return operation;
+  }
+
+  Future<void> _deleteSessionOnce(
     String topic, {
-    bool expirerHasDeleted = false,
+    required bool expirerHasDeleted,
   }) async {
-    // print('deleting session: $topic, expirerHasDeleted: $expirerHasDeleted');
-    final SessionData? session = sessions.get(topic);
-    if (session == null) {
+    final session = sessions.get(topic);
+    final retainedPublicKey = _pendingSessionDeletions.get(topic);
+    if (session == null && retainedPublicKey == null) return;
+
+    final newlyRevoked = retainedPublicKey == null;
+    final publicKey = retainedPublicKey ?? session!.self.publicKey;
+    if (newlyRevoked) {
+      await _pendingSessionDeletions.set(topic, publicKey);
+    }
+
+    if (!core.pairing.tryBeginResponseTopicTeardown(topic: topic)) {
+      core.pairing
+          .waitForPendingResponses(topic: topic)
+          .then<void>(
+            (_) => _resumeSessionDeletion(
+              topic,
+              expirerHasDeleted: expirerHasDeleted,
+            ),
+            onError: (Object error, StackTrace stackTrace) {
+              core.logger.e(
+                '[$runtimeType] pending response wait failed for session $topic',
+                error: error,
+                stackTrace: stackTrace,
+              );
+            },
+          );
+      if (newlyRevoked) {
+        onSessionDelete.broadcast(SessionDelete(topic));
+      }
       return;
     }
-    await core.relayClient.unsubscribe(topic: topic);
 
+    await core.relayClient.unsubscribe(topic: topic);
     await sessions.delete(topic);
-    await core.crypto.deleteKeyPair(session.self.publicKey);
+    await core.crypto.deleteKeyPair(publicKey);
     await core.crypto.deleteSymKey(topic);
     if (expirerHasDeleted) {
       await core.expirer.delete(topic);
     }
+    await _pendingSessionDeletions.delete(topic);
 
-    onSessionDelete.broadcast(SessionDelete(topic));
+    if (newlyRevoked) {
+      onSessionDelete.broadcast(SessionDelete(topic));
+    }
+  }
+
+  Future<void> _resumeSessionDeletion(
+    String topic, {
+    required bool expirerHasDeleted,
+  }) async {
+    final active = _sessionDeletionOperations[topic];
+    if (active != null) {
+      try {
+        await active;
+      } catch (_) {
+        // The original caller observes this failure. The persisted tombstone
+        // still owns transport cleanup, so settlement must retry it.
+      }
+    }
+    await _deleteSession(topic, expirerHasDeleted: expirerHasDeleted);
   }
 
   Future<void> _deleteProposal(int id, {bool expirerHasDeleted = false}) async {
@@ -1630,7 +1714,7 @@ class ReownSign implements IReownSign {
   /// ---- Validation Helpers ---- ///
 
   Future<bool> _isValidSessionTopic(String topic) async {
-    if (!sessions.has(topic)) {
+    if (!sessions.has(topic) || _pendingSessionDeletions.has(topic)) {
       throw Errors.getInternalError(
         Errors.NO_MATCHING_KEY,
         context: "session topic doesn't exist: $topic",

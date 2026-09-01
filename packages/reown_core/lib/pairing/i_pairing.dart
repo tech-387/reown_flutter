@@ -74,6 +74,17 @@ abstract class IPairing {
     required String method,
   });
 
+  /// Whether [topic] still owns at least one exact pending response.
+  bool hasPendingResponse({required String topic});
+
+  /// Completes when every exact pending response for [topic] is terminal.
+  Future<void> waitForPendingResponses({required String topic});
+
+  /// Atomically reserves [topic] for teardown when it has no pending responses.
+  ///
+  /// Once reserved, no new response waiter can be registered for the topic.
+  bool tryBeginResponseTopicTeardown({required String topic});
+
   /// Returns valid JSON-RPC envelopes recorded for [topic].
   ///
   /// Storage access and decryption stay inside Reown. Invalid or undecryptable

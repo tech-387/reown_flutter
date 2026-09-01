@@ -67,6 +67,9 @@ class Pairing implements IPairing {
   /// Stores all the pending requests
   Map<int, PendingRequestResponse> pendingRequests = {};
 
+  final Map<String, Completer<void>> _pendingResponseWaiters = {};
+  final Set<String> _retiringResponseTopics = {};
+
   final IReownCore core;
   final IPairingStore pairings;
   final IJsonRpcHistory history;
@@ -472,11 +475,11 @@ class Pairing implements IPairing {
             options: publishOptions,
           );
         } catch (_) {
-          pendingRequests.remove(requestId);
+          _removePendingResponse(requestId);
           rethrow;
         }
         if (!published) {
-          pendingRequests.remove(requestId);
+          _removePendingResponse(requestId);
           throw const ReownCoreError(
             code: -1,
             message: 'Relay publication was not acknowledged.',
@@ -537,6 +540,12 @@ class Pairing implements IPairing {
     required String method,
     required bool reuseExact,
   }) {
+    if (_retiringResponseTopics.contains(topic)) {
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Response topic teardown has already started.',
+      );
+    }
     final existing = pendingRequests[requestId];
     if (existing != null) {
       if (reuseExact && existing.topic == topic && existing.method == method) {
@@ -569,6 +578,25 @@ class Pairing implements IPairing {
       method: method,
       reuseExact: true,
     ).completer.future;
+  }
+
+  @override
+  bool hasPendingResponse({required String topic}) =>
+      pendingRequests.values.any((request) => request.topic == topic);
+
+  @override
+  Future<void> waitForPendingResponses({required String topic}) {
+    if (!hasPendingResponse(topic: topic)) return Future.value();
+    return _pendingResponseWaiters
+        .putIfAbsent(topic, Completer<void>.new)
+        .future;
+  }
+
+  @override
+  bool tryBeginResponseTopicTeardown({required String topic}) {
+    if (hasPendingResponse(topic: topic)) return false;
+    _retiringResponseTopics.add(topic);
+    return true;
   }
 
   @override
@@ -634,8 +662,18 @@ class Pairing implements IPairing {
         existing.method != method) {
       return false;
     }
-    pendingRequests.remove(requestId);
+    _removePendingResponse(requestId);
     return true;
+  }
+
+  PendingRequestResponse? _removePendingResponse(int requestId) {
+    final pending = pendingRequests.remove(requestId);
+    if (pending == null || hasPendingResponse(topic: pending.topic)) {
+      return pending;
+    }
+    final waiter = _pendingResponseWaiters.remove(pending.topic);
+    if (waiter != null && !waiter.isCompleted) waiter.complete();
+    return pending;
   }
 
   ///
@@ -1174,7 +1212,7 @@ class Pairing implements IPairing {
             pendingRequest.completer.complete(response.result);
           }
         }
-        pendingRequests.remove(response.id);
+        _removePendingResponse(response.id);
 
         if (isLinkMode) {
           // Send Event through Events SDK

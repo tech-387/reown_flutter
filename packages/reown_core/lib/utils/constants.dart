@@ -59,6 +59,8 @@ class StoreVersions {
   static const VERSION_PROPOSALS = '1.1';
   static const CONTEXT_SESSIONS = 'sessions';
   static const VERSION_SESSIONS = '1.1';
+  static const CONTEXT_PENDING_SESSION_DELETIONS = 'pendingSessionDeletions';
+  static const VERSION_PENDING_SESSION_DELETIONS = '1.0';
   static const CONTEXT_PENDING_REQUESTS = 'pendingRequests';
   static const VERSION_PENDING_REQUESTS = '1.0';
 
