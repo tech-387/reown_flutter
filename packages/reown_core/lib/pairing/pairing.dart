@@ -17,6 +17,7 @@ import 'package:reown_core/pairing/utils/pairing_models.dart';
 import 'package:reown_core/pairing/utils/json_rpc_utils.dart';
 import 'package:reown_core/relay_client/i_relay_client.dart';
 import 'package:reown_core/relay_client/relay_client_models.dart';
+import 'package:reown_core/relay_client/request_publication_controller.dart';
 import 'package:reown_core/utils/utils.dart';
 import 'package:reown_core/models/uri_parse_result.dart';
 import 'package:reown_core/models/basic_models.dart';
@@ -395,11 +396,20 @@ class Pairing implements IPairing {
     String? appLink,
     bool openUrl = true,
     TVFData? tvf,
+    RequestPublicationController? publication,
   }) async {
+    publication?.throwIfCancelled();
     final payload = JsonRpcUtils.formatJsonRpcRequest(method, params, id: id);
     final requestId = payload['id'] as int;
 
     final isLinkMode = (appLink ?? '').isNotEmpty;
+    if (publication != null &&
+        (isLinkMode || core.relayClient is! ICancellableRelayClient)) {
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Transport does not support cancellable relay publication.',
+      );
+    }
 
     final message = await core.crypto.encode(
       topic,
@@ -408,6 +418,8 @@ class Pairing implements IPairing {
           ? EncodeOptions(type: EncodeOptions.TYPE_2)
           : encodeOptions,
     );
+
+    publication?.throwIfCancelled();
 
     if (message == null) {
       return;
@@ -429,93 +441,124 @@ class Pairing implements IPairing {
       ),
     );
 
-    if (isLinkMode) {
-      // during wc_sessionAuthenticate we don't need to openURL as it will be done by the host dapp
-      if (openUrl) {
-        final redirectURL = ReownCoreUtils.getLinkModeURL(
-          appLink!,
-          topic,
-          message,
+    Future<void> publish() async {
+      if (isLinkMode) {
+        // during wc_sessionAuthenticate we don't need to openURL as it will be done by the host dapp
+        if (openUrl) {
+          final redirectURL = ReownCoreUtils.getLinkModeURL(
+            appLink!,
+            topic,
+            message,
+          );
+          await ReownCoreUtils.openURL(redirectURL);
+        }
+        // Send Event through Events SDK
+        core.events.recordEvent(
+          LinkModeRequestEvent(
+            direction: 'sent',
+            correlationId: requestId,
+            method: method,
+          ),
         );
-        await ReownCoreUtils.openURL(redirectURL);
-      }
-      // Send Event through Events SDK
-      core.events.recordEvent(
-        LinkModeRequestEvent(
-          direction: 'sent',
-          correlationId: requestId,
-          method: method,
-        ),
-      );
-      core.logger.d(
-        '[$runtimeType] sendRequest linkMode ($appLink), '
-        'id: $requestId topic: $topic, method: $method, '
-        'params: $params, ttl: $ttl',
-      );
-    } else {
-      RpcOptions opts = MethodConstants.RPC_OPTS[method]!['req']!;
-      if (ttl != null) {
-        opts = opts.copyWith(ttl: ttl);
-      }
+        core.logger.d(
+          '[$runtimeType] sendRequest linkMode ($appLink), '
+          'id: $requestId topic: $topic, method: $method, '
+          'params: $params, ttl: $ttl',
+        );
+      } else {
+        RpcOptions opts = MethodConstants.RPC_OPTS[method]!['req']!;
+        if (ttl != null) {
+          opts = opts.copyWith(ttl: ttl);
+        }
 
-      final publishOptions = PublishOptions(
-        ttl: ttl ?? opts.ttl,
-        tag: opts.tag,
-        correlationId: requestId,
-        // tvf data is sent only on tvfMethods methods
-        tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
-      );
-      final relayClient = core.relayClient;
-      if (relayClient is IAcknowledgedRelayClient) {
-        final acknowledgedRelayClient = relayClient as IAcknowledgedRelayClient;
-        late final bool published;
-        try {
-          published = await acknowledgedRelayClient.publishAcknowledged(
+        final publishOptions = PublishOptions(
+          ttl: ttl ?? opts.ttl,
+          tag: opts.tag,
+          correlationId: requestId,
+          // tvf data is sent only on tvfMethods methods
+          tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
+        );
+        final relayClient = core.relayClient;
+        if (publication != null || relayClient is IAcknowledgedRelayClient) {
+          late final bool published;
+          try {
+            published = publication == null
+                ? await (relayClient as IAcknowledgedRelayClient)
+                      .publishAcknowledged(
+                        topic: topic,
+                        message: message,
+                        options: publishOptions,
+                      )
+                : await (relayClient as ICancellableRelayClient)
+                      .publishCancellable(
+                        topic: topic,
+                        message: message,
+                        options: publishOptions,
+                        publication: publication,
+                      );
+          } catch (error, stackTrace) {
+            if (publication?.hasStarted == true) {
+              core.logger.e(
+                '[$runtimeType] publication uncertain; retaining exact response',
+                error: error,
+                stackTrace: stackTrace,
+              );
+              return;
+            }
+            _removePendingResponse(requestId);
+            rethrow;
+          }
+          if (!published && publication?.hasStarted != true) {
+            _removePendingResponse(requestId);
+            throw const ReownCoreError(
+              code: -1,
+              message: 'Relay publication was not acknowledged.',
+            );
+          }
+
+          // Listener code must not make an already-published request fail.
+          try {
+            if (published) {
+              onRelayRequestPublished.broadcast(
+                RelayRequestPublishedEvent(
+                  requestId: requestId,
+                  topic: topic,
+                  method: method,
+                ),
+              );
+            }
+          } catch (error, stackTrace) {
+            core.logger.e(
+              '[$runtimeType] onRelayRequestPublished listener failed',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          }
+        } else {
+          // Custom legacy relay clients cannot report a positive relay ACK.
+          await relayClient.publish(
             topic: topic,
             message: message,
             options: publishOptions,
           );
-        } catch (_) {
-          _removePendingResponse(requestId);
-          rethrow;
         }
-        if (!published) {
-          _removePendingResponse(requestId);
-          throw const ReownCoreError(
-            code: -1,
-            message: 'Relay publication was not acknowledged.',
-          );
-        }
-
-        // Listener code must not make an already-published request fail.
-        try {
-          onRelayRequestPublished.broadcast(
-            RelayRequestPublishedEvent(
-              requestId: requestId,
-              topic: topic,
-              method: method,
-            ),
-          );
-        } catch (error, stackTrace) {
-          core.logger.e(
-            '[$runtimeType] onRelayRequestPublished listener failed',
-            error: error,
-            stackTrace: stackTrace,
-          );
-        }
-      } else {
-        // Custom legacy relay clients cannot report a positive relay ACK.
-        await relayClient.publish(
-          topic: topic,
-          message: message,
-          options: publishOptions,
+        core.logger.d(
+          '[$runtimeType] sendRequest relayClient, '
+          'id: $requestId topic: $topic, method: $method, '
+          'params: $params, ttl: ${ttl ?? opts.ttl}',
         );
       }
-      core.logger.d(
-        '[$runtimeType] sendRequest relayClient, '
-        'id: $requestId topic: $topic, method: $method, '
-        'params: $params, ttl: ${ttl ?? opts.ttl}',
-      );
+    }
+
+    if (publication == null) {
+      await publish();
+    } else {
+      // A controlled request can finish before its relay ACK. Keep the losing
+      // publication future observed without changing legacy/Link Mode ordering.
+      await Future.any<void>([
+        publish(),
+        resp.completer.future.then<void>((_) {}),
+      ]);
     }
 
     // Get the result from the completer, if it's an error, throw it
@@ -754,7 +797,15 @@ class Pairing implements IPairing {
     Map<String, dynamic> params, {
     int? id,
     EncodeOptions? encodeOptions,
+    RequestPublicationController? publication,
   }) async {
+    publication?.throwIfCancelled();
+    if (publication != null && core.relayClient is! ICancellableRelayClient) {
+      throw const ReownCoreError(
+        code: -1,
+        message: 'Transport does not support cancellable relay publication.',
+      );
+    }
     final proposeSessionPayload = JsonRpcUtils.formatJsonRpcRequest(
       MethodConstants.WC_SESSION_PROPOSE,
       params,
@@ -767,6 +818,8 @@ class Pairing implements IPairing {
       proposeSessionPayload,
       options: encodeOptions,
     );
+
+    publication?.throwIfCancelled();
 
     if (proposeSessionMessage == null) {
       return;
@@ -799,11 +852,47 @@ class Pairing implements IPairing {
       publishMethod: RelayClient.WC_PROPOSE_SESSION,
     );
 
-    await core.relayClient.publishPayload(payload: payload, options: options);
-    core.logger.d(
-      '[$runtimeType] sendProposeSessionRequest relayClient, '
-      'payload: ${jsonEncode(payload)}, options: ${jsonEncode(options.toJson())}',
-    );
+    Future<void> publish() async {
+      try {
+        if (publication == null) {
+          await core.relayClient.publishPayload(
+            payload: payload,
+            options: options,
+          );
+        } else {
+          await (core.relayClient as ICancellableRelayClient)
+              .publishPayloadCancellable(
+                payload: payload,
+                options: options,
+                publication: publication,
+              );
+        }
+      } catch (error, stackTrace) {
+        if (publication == null || !publication.hasStarted) {
+          if (publication != null) _removePendingResponse(requestId);
+          rethrow;
+        }
+        core.logger.e(
+          '[$runtimeType] proposal publication uncertain; retaining exact response',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+      core.logger.d(
+        '[$runtimeType] sendProposeSessionRequest relayClient, '
+        'payload: ${jsonEncode(payload)}, options: ${jsonEncode(options.toJson())}',
+      );
+    }
+
+    if (publication == null) {
+      await publish();
+    } else {
+      // Only controlled proposals opt into response-before-ACK completion.
+      await Future.any<void>([
+        publish(),
+        resp.completer.future.then<void>((_) {}),
+      ]);
+    }
 
     // Get the result from the completer, if it's an error, throw it
     try {
@@ -1271,6 +1360,29 @@ class Pairing implements IPairing {
         }
 
         if (!pendingRequest.completer.isCompleted) {
+          if (response.error == null &&
+              pendingRequest.method == MethodConstants.WC_SESSION_PROPOSE) {
+            final pairing = pairings.get(event.topic);
+            if (pairing != null) {
+              // Renew before releasing the response owner. Expiry cleanup must
+              // not race Sign's subsequent shared-key/subscription awaits.
+              try {
+                await activate(topic: event.topic);
+              } catch (error, stackTrace) {
+                // PairingStore updates its in-memory expiry before persistence.
+                // A storage failure must not discard an already decoded reply.
+                core.logger.e(
+                  '[$runtimeType] proposal pairing activation failed',
+                  error: error,
+                  stackTrace: stackTrace,
+                );
+              }
+              if (pendingRequest.completer.isCompleted ||
+                  !identical(pendingRequests[response.id], pendingRequest)) {
+                return;
+              }
+            }
+          }
           if (response.error != null) {
             pendingRequest.error = response.error;
             pendingRequest.completer.completeError(response.error!);
@@ -1417,11 +1529,17 @@ class Pairing implements IPairing {
     }
     core.logger.d('[$runtimeType] _onExpired, ${event.toString()}');
 
-    if (pairings.has(event.target)) {
-      // Clean up the pairing
-      await _deletePairing(event.target, true);
-      onPairingExpire.broadcast(PairingEvent(topic: event.target));
+    while (true) {
+      final pairing = pairings.get(event.target);
+      if (pairing == null || !ReownCoreUtils.isExpired(pairing.expiry)) return;
+      if (tryBeginResponseTopicTeardown(topic: event.target)) break;
+
+      // The pairing key/subscription still belongs to an outgoing response.
+      // Recheck expiry after settlement: an accepted proposal renews pairing.
+      await waitForPendingResponses(topic: event.target);
     }
+    await _deletePairing(event.target, true);
+    onPairingExpire.broadcast(PairingEvent(topic: event.target));
   }
 
   void _heartbeatSubscription(EventArgs? args) async {

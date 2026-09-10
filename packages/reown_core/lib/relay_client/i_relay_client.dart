@@ -1,6 +1,7 @@
 import 'package:event/event.dart';
 import 'package:reown_core/models/basic_models.dart';
 import 'package:reown_core/relay_client/relay_client_models.dart';
+import 'package:reown_core/relay_client/request_publication_controller.dart';
 
 abstract class IRelayClient {
   /// Relay Client Events
@@ -66,5 +67,22 @@ abstract interface class IAcknowledgedRelayClient {
     required String topic,
     required String message,
     required PublishOptions options,
+  });
+}
+
+/// Optional relay capability for cancellation at the actual transport boundary.
+/// Existing custom relay implementations remain source-compatible.
+abstract interface class ICancellableRelayClient {
+  Future<bool> publishCancellable({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+    required RequestPublicationController publication,
+  });
+
+  Future<void> publishPayloadCancellable({
+    required Map<String, dynamic> payload,
+    required PublishOptions options,
+    required RequestPublicationController publication,
   });
 }

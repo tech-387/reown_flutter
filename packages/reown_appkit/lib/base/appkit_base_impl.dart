@@ -178,6 +178,8 @@ class ReownAppKit implements IReownAppKit {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods = DEFAULT_METHODS,
+    RequestPublicationController? publication,
+    int? requestId,
   }) async {
     try {
       return await reOwnSign.connect(
@@ -188,6 +190,8 @@ class ReownAppKit implements IReownAppKit {
         relays: relays,
         authentication: authentication,
         methods: methods,
+        publication: publication,
+        requestId: requestId,
       );
     } catch (e) {
       // print(e);

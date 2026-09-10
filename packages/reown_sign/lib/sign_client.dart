@@ -153,6 +153,8 @@ class ReownSignClient implements IReownSignClient {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods = ReownSign.DEFAULT_METHODS,
+    RequestPublicationController? publication,
+    int? requestId,
   }) async {
     try {
       return await engine.connect(
@@ -163,6 +165,8 @@ class ReownSignClient implements IReownSignClient {
         relays: relays,
         authentication: authentication,
         methods: methods,
+        publication: publication,
+        requestId: requestId,
       );
     } catch (e) {
       // print(e);

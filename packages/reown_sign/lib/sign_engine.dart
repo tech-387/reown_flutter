@@ -84,6 +84,7 @@ class ReownSign implements IReownSign {
   final IGenericStore<SessionRequest> pendingRequests;
 
   List<SessionProposalCompleter> pendingProposals = [];
+  final Map<String, SessionProposalCompleter> _proposalBySessionTopic = {};
 
   Map<int, TVFData> pendingTVFRequests = {};
 
@@ -174,7 +175,10 @@ class ReownSign implements IReownSign {
     List<SessionAuthRequestParams>? authentication,
     // WalletPayParams? walletPay;
     List<List<String>>? methods = DEFAULT_METHODS,
+    RequestPublicationController? publication,
+    int? requestId,
   }) async {
+    publication?.throwIfCancelled();
     _checkInitialized();
     _confirmOnlineStateOrThrow();
 
@@ -210,7 +214,7 @@ class ReownSign implements IReownSign {
     }
 
     final publicKey = await core.crypto.generateKeyPair();
-    final int id = JsonRpcUtils.payloadId();
+    final int id = requestId ?? JsonRpcUtils.payloadId();
 
     // Merge requiredNamespaces into optionalNamespaces, avoiding duplicates
     final mergedNamespaces = NamespaceUtils.mergeRequiredIntoOptionalNamespaces(
@@ -247,22 +251,33 @@ class ReownSign implements IReownSign {
       pairingTopic: pTopic,
       requests: request.requests,
     );
-    await _setProposal(id, proposal);
+    if (proposals.has(id.toString()) ||
+        pendingProposals.any((pending) => pending.id == id)) {
+      throw ReownSignError(
+        code: -1,
+        message: 'Proposal request identity conflict for request $id.',
+      );
+    }
 
     Completer<SessionData> completer = Completer();
-
-    pendingProposals.add(
-      SessionProposalCompleter(
-        id: id,
-        selfPublicKey: publicKey,
-        requiredNamespaces: request.requiredNamespaces,
-        optionalNamespaces: request.optionalNamespaces ?? {},
-        sessionProperties: request.sessionProperties,
-        pairingTopic: pTopic,
-        completer: completer,
-      ),
+    final pending = SessionProposalCompleter(
+      id: id,
+      selfPublicKey: publicKey,
+      requiredNamespaces: request.requiredNamespaces,
+      optionalNamespaces: request.optionalNamespaces ?? {},
+      sessionProperties: request.sessionProperties,
+      pairingTopic: pTopic,
+      completer: completer,
     );
-    _connectResponseHandler(pTopic, request, id);
+    // Reserve the identity before persistence yields to another connect call.
+    pendingProposals.add(pending);
+    try {
+      await _setProposal(id, proposal);
+    } catch (_) {
+      pendingProposals.remove(pending);
+      rethrow;
+    }
+    _connectResponseHandler(pTopic, request, id, publication: publication);
 
     final ConnectResponse resp = ConnectResponse(
       pairingTopic: pTopic,
@@ -276,33 +291,76 @@ class ReownSign implements IReownSign {
   Future<void> _connectResponseHandler(
     String topic,
     WcSessionProposeRequest request,
-    int requestId,
-  ) async {
+    int requestId, {
+    RequestPublicationController? publication,
+  }) async {
+    final owned = pendingProposals
+        .where((proposal) => proposal.id == requestId)
+        .firstOrNull;
     try {
+      if (owned == null) {
+        throw ReownSignError(
+          code: -1,
+          message: 'Proposal request $requestId has no pending owner.',
+        );
+      }
       final response = await core.pairing.sendProposeSessionRequest(
         topic,
         request.toJson(),
         id: requestId,
+        publication: publication,
       );
       final String peerPublicKey = response['responderPublicKey'];
 
-      final ProposalData proposal = proposals.get(requestId.toString())!;
       final String sessionTopic = await core.crypto.generateSharedKey(
-        proposal.proposer.publicKey,
+        owned.selfPublicKey,
         peerPublicKey,
       );
-      // print('connectResponseHandler session topic: $sessionTopic');
+      if (!pendingProposals.contains(owned)) return;
+      final existing = _proposalBySessionTopic[sessionTopic];
+      if (existing != null && !identical(existing, owned)) {
+        throw ReownSignError(
+          code: -1,
+          message: 'Session topic is already bound to another proposal.',
+        );
+      }
+      // A subscription can deliver settlement before subscribe() completes.
+      _proposalBySessionTopic[sessionTopic] = owned;
 
       // Delete the proposal, we are done with it
       await _deleteProposal(requestId);
 
-      await core.relayClient.subscribe(
-        options: SubscribeOptions(topic: sessionTopic),
-      );
-      await core.pairing.activate(topic: topic);
+      try {
+        await core.relayClient.subscribe(
+          options: SubscribeOptions(topic: sessionTopic),
+        );
+      } catch (error, stackTrace) {
+        if (publication == null) rethrow;
+        // Subscription may already be active when its persistence fails.
+        // Keep this exact owner available for a later wallet settlement.
+        core.logger.e(
+          '[$runtimeType] subscription uncertain; retaining proposal $requestId',
+          error: error,
+          stackTrace: stackTrace,
+        );
+        return;
+      }
+      final pairing = core.pairing.getPairing(topic: topic);
+      if (pairing == null ||
+          !pairing.active ||
+          ReownCoreUtils.isExpired(pairing.expiry)) {
+        await core.pairing.activate(topic: topic);
+      }
     } catch (e, s) {
       // Get the completer and finish it with an error
-      pendingProposals.removeLast().completer.completeError(e);
+      if (owned != null) {
+        _proposalBySessionTopic.removeWhere(
+          (_, value) => identical(value, owned),
+        );
+        if (pendingProposals.remove(owned) && !owned.completer.isCompleted) {
+          owned.completer.completeError(e);
+        }
+      }
       core.logger.e('[$runtimeType] connect error: $e, $s');
     }
   }
@@ -1208,9 +1266,15 @@ class ReownSign implements IReownSign {
     try {
       await _isValidSessionSettleRequest(request.namespaces, request.expiry);
 
-      final SessionProposalCompleter sProposalCompleter = pendingProposals
-          .removeLast();
-      // print(sProposalCompleter);
+      final sProposalCompleter = _proposalBySessionTopic.remove(topic);
+      if (sProposalCompleter == null ||
+          !pendingProposals.remove(sProposalCompleter)) {
+        core.logger.d(
+          '[$runtimeType] ignoring settlement without a matching proposal '
+          'owner, topic: $topic',
+        );
+        return;
+      }
 
       // Create the session
       final session = SessionData(

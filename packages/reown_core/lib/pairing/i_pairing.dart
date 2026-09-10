@@ -6,6 +6,7 @@ import 'package:reown_core/models/tvf_data.dart';
 import 'package:reown_core/pairing/i_pairing_store.dart';
 import 'package:reown_core/pairing/utils/pairing_models.dart';
 import 'package:reown_core/relay_client/relay_client_models.dart';
+import 'package:reown_core/relay_client/request_publication_controller.dart';
 
 abstract class IPairing {
   abstract final Event<PairingEvent> onPairingCreate;
@@ -61,6 +62,7 @@ abstract class IPairing {
     String? appLink,
     bool openUrl = true,
     TVFData? tvf,
+    RequestPublicationController? publication,
   });
 
   /// Publishes a relay request after positive relay acknowledgement.
@@ -120,6 +122,7 @@ abstract class IPairing {
     Map<String, dynamic> params, {
     int? id,
     EncodeOptions? encodeOptions,
+    RequestPublicationController? publication,
   });
 
   Future<void> sendResult(

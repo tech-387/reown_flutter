@@ -95,6 +95,8 @@ class SignClientTestWrapper implements IReownSign {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods = ReownSign.DEFAULT_METHODS,
+    RequestPublicationController? publication,
+    int? requestId,
   }) async {
     try {
       return await client.connect(
@@ -105,6 +107,8 @@ class SignClientTestWrapper implements IReownSign {
         relays: relays,
         authentication: authentication,
         methods: methods,
+        publication: publication,
+        requestId: requestId,
       );
     } catch (e) {
       // print(e);

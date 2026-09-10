@@ -8,6 +8,7 @@ export 'models/uri_parse_result.dart';
 export 'pairing/i_pairing_store.dart';
 export 'pairing/utils/pairing_models.dart';
 export 'relay_client/relay_client_models.dart';
+export 'relay_client/request_publication_controller.dart';
 export 'store/store_models.dart';
 export 'utils/errors.dart';
 export 'utils/cosmos_utils.dart';

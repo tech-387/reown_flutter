@@ -9,6 +9,7 @@ import 'package:reown_core/relay_client/json_rpc_2/src/parameters.dart';
 import 'package:reown_core/relay_client/json_rpc_2/src/peer.dart';
 import 'package:reown_core/relay_client/websocket/i_websocket_handler.dart';
 import 'package:reown_core/relay_client/relay_client_models.dart';
+import 'package:reown_core/relay_client/request_publication_controller.dart';
 import 'package:reown_core/relay_client/websocket/websocket_handler.dart';
 import 'package:reown_core/store/i_generic_store.dart';
 import 'package:reown_core/utils/utils.dart';
@@ -18,7 +19,8 @@ import 'package:reown_core/utils/constants.dart';
 import 'package:reown_core/utils/errors.dart';
 import 'package:reown_core/version.dart';
 
-class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
+class RelayClient
+    implements IRelayClient, IAcknowledgedRelayClient, ICancellableRelayClient {
   static const IRN_PUBLISH = 'publish';
   static const IRN_SUBSCRIPTION = 'subscription';
   static const IRN_SUBSCRIBE = 'subscribe';
@@ -126,6 +128,26 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
     required String topic,
     required String message,
     required PublishOptions options,
+  }) => _publishAcknowledged(topic: topic, message: message, options: options);
+
+  @override
+  Future<bool> publishCancellable({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+    required RequestPublicationController publication,
+  }) => _publishAcknowledged(
+    topic: topic,
+    message: message,
+    options: options,
+    publication: publication,
+  );
+
+  Future<bool> _publishAcknowledged({
+    required String topic,
+    required String message,
+    required PublishOptions options,
+    RequestPublicationController? publication,
   }) async {
     _checkInitialized();
 
@@ -138,13 +160,18 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
     core.logger.d('[$runtimeType] publish topic: $topic, $parameters');
 
     try {
+      publication?.throwIfCancelled();
       await messageTracker.recordMessageEvent(topic, message);
       final result = await _sendJsonRpcRequest(
         id: JsonRpcUtils.payloadId(entropy: 6),
         method: _buildIRNMethod(IRN_PUBLISH),
         parameters: parameters,
+        publication: publication,
       );
+      if (result == true) publication?.acknowledge();
       return result == true;
+    } on RequestPublicationCancelled {
+      rethrow;
     } catch (e, s) {
       core.logger.e('[$runtimeType], publish: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
@@ -156,6 +183,23 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
   Future<void> publishPayload({
     required Map<String, dynamic> payload,
     required PublishOptions options,
+  }) => _publishPayload(payload: payload, options: options);
+
+  @override
+  Future<void> publishPayloadCancellable({
+    required Map<String, dynamic> payload,
+    required PublishOptions options,
+    required RequestPublicationController publication,
+  }) => _publishPayload(
+    payload: payload,
+    options: options,
+    publication: publication,
+  );
+
+  Future<void> _publishPayload({
+    required Map<String, dynamic> payload,
+    required PublishOptions options,
+    RequestPublicationController? publication,
   }) async {
     _checkInitialized();
 
@@ -163,6 +207,7 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
     core.logger.d('[$runtimeType] publishPayload, $parameters');
 
     try {
+      publication?.throwIfCancelled();
       if (options.publishMethod == RelayClient.WC_PROPOSE_SESSION) {
         final topic = payload['pairingTopic'];
         final message = payload['sessionProposal'];
@@ -172,14 +217,31 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
         final message = payload['sessionProposalResponse'];
         await messageTracker.recordMessageEvent(topic, message);
       }
-      final _ = await _sendJsonRpcRequest(
+      final result = await _sendJsonRpcRequest(
         id: JsonRpcUtils.payloadId(entropy: 6),
         method: _buildWCMethod(options.publishMethod!),
         parameters: parameters,
+        publication: publication,
       );
+      if (publication != null && !publication.hasStarted) {
+        publication.throwIfCancelled();
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay publication did not start.',
+        );
+      }
+      // Sign 2.5 custom RPCs acknowledge with a successful JSON-RPC response;
+      // unlike irn_publish, their result is not constrained to boolean true.
+      // A local no-connection return never crosses beginSend and is not an ACK.
+      if (publication?.hasStarted == true && result != false) {
+        publication?.acknowledge();
+      }
+    } on RequestPublicationCancelled {
+      rethrow;
     } catch (e, s) {
       core.logger.e('[$runtimeType], publishPayload: $e, $s');
       onRelayClientError.broadcast(ErrorEvent(e));
+      if (publication != null && !publication.hasStarted) rethrow;
     }
   }
 
@@ -507,7 +569,9 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
     required String method,
     int? id,
     dynamic parameters,
+    RequestPublicationController? publication,
   }) async {
+    publication?.throwIfCancelled();
     // If we are connected and we know it send the message!
     if (isConnected) {
       // Here so we dont return null
@@ -531,6 +595,9 @@ class RelayClient implements IRelayClient, IAcknowledgedRelayClient {
       return null;
     }
 
+    // Keep this checkpoint next to the synchronous send. Preparation,
+    // persistence and reconnect may all have completed after local cancellation.
+    publication?.beginSend();
     return await jsonRPC!.sendRequest(method, parameters, id);
   }
 

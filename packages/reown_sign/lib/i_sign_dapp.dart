@@ -20,6 +20,8 @@ abstract class IReownSignDapp extends IReownSignCommon {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods,
+    RequestPublicationController? publication,
+    int? requestId,
   });
   Future<dynamic> request({
     int? requestId,

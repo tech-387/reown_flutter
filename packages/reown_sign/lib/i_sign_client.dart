@@ -50,6 +50,8 @@ abstract class IReownSignClient {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods,
+    RequestPublicationController? publication,
+    int? requestId,
   });
   Future<PairingInfo> pair({required Uri uri});
   Future<ApproveResponse> approve({
