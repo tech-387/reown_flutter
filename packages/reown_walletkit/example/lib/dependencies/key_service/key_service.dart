@@ -66,13 +66,26 @@ class KeyService extends IKeyService {
   }
 
   @override
+  Future<bool> setWCPApiKey(String apiKey) async {
+    return await _prefs.setString('rwkt_wcp_api_key', apiKey);
+  }
+
+  @override
+  String? getWCPApiKey() {
+    return _prefs.getString('rwkt_wcp_api_key');
+  }
+
+  @override
   Future<List<ChainKey>> loadKeys() async {
     // ⚠️ WARNING: SharedPreferences is not the best way to store your keys! This is just for example purposes!
     try {
       final isUpdated = await _isUpdated();
       if (isUpdated.$1) {
         // regenerate the wallet after an update
-        await restoreWallet(mnemonicOrPrivate: getMnemonic());
+        final mnemonic = getMnemonic();
+        if (mnemonic.isNotEmpty) {
+          await restoreWallet(mnemonicOrPrivate: mnemonic);
+        }
         await _prefs.setString('rwkt_build_number', isUpdated.$2.toString());
       }
       final savedKeys = _prefs.getStringList('rwkt_chain_keys')!;
@@ -125,7 +138,6 @@ class KeyService extends IKeyService {
   @override
   String getMnemonic() {
     final mnemonic = _prefs.getString('rwkt_mnemonic') ?? '';
-    debugPrint('[$runtimeType] getMnemonic $mnemonic');
     return mnemonic;
   }
 
@@ -180,7 +192,7 @@ class KeyService extends IKeyService {
     // ⚠️ WARNING: SharedPreferences is not the best way to store your keys! This is just for example purposes!
     await _prefs.remove('rwkt_chain_keys');
     await _prefs.remove('rwkt_mnemonic');
-    debugPrint('[$runtimeType] _restoreWalletFromPrivateKey $privateKey');
+    debugPrint('[$runtimeType] _restoreWalletFromPrivateKey (key set)');
 
     final ecDomain = ECCurve_secp256k1();
     final bigIntPrivateKey = BigInt.parse(privateKey, radix: 16);
@@ -200,7 +212,6 @@ class KeyService extends IKeyService {
     // ⚠️ WARNING: SharedPreferences is not the best way to store your keys! This is just for example purposes!
     await _prefs.remove('rwkt_chain_keys');
     await _prefs.setString('rwkt_mnemonic', mnemonic);
-    debugPrint('[$runtimeType] _restoreFromMnemonic $mnemonic');
 
     final eip155ChainKey = _evmChainKey(mnemonic);
     final solanaChainKey = await _solanaChainKey(mnemonic);
@@ -288,12 +299,13 @@ class KeyService extends IKeyService {
       );
       final publicBytes = solanaKeyPair.publicKey.bytes;
       final privateBytes = (await solanaKeyPair.extract()).bytes;
-      final privateKey =
-          hex.encode(Uint8List.fromList(privateBytes + publicBytes));
+      final privateKey = hex.encode(
+        Uint8List.fromList(privateBytes + publicBytes),
+      );
 
       return ChainKey(
         chains: ChainsDataList.solanaChains.map((e) => e.chainId).toList(),
-        privateKey: '0x$privateKey',
+        privateKey: privateKey,
         publicKey: solanaKeyPair.publicKey.toString(),
         address: solanaKeyPair.address,
         namespace: 'solana',
@@ -424,68 +436,6 @@ class KeyService extends IKeyService {
     }
   }
 
-  Future<ChainKey?> _tonChainKey(String mnemonic) async {
-    try {
-      final service = GetIt.I<IWalletKitService>();
-      final chainIds = ChainsDataList.tonChains
-          .where((c) => !c.isTestnet)
-          .map((e) => e.chainId)
-          .toList();
-      final tonService = service.getChainService<TonService>(
-        chainId: chainIds.first,
-      );
-      final keyPair = await tonService.generateKeypairFromBip39Mnemonic(
-        mnemonic,
-      );
-      final address = await tonService.getAddressFromKeypair(
-        keyPair,
-      );
-
-      return ChainKey(
-        chains: chainIds,
-        privateKey: keyPair.sk,
-        publicKey: keyPair.pk,
-        address: address.friendlyEq,
-        namespace: 'ton',
-      );
-    } catch (e, s) {
-      debugPrint('[$runtimeType] _tonChainKey error: $e');
-      debugPrint('[$runtimeType] _tonChainKey error: $s');
-      return null;
-    }
-  }
-
-  // Future<ChainKey?> _tonTestChainKey(String mnemonic) async {
-  //   try {
-  //     final service = GetIt.I<IWalletKitService>();
-  //     final chainIds = ChainsDataList.tonChains
-  //         .where((c) => c.isTestnet)
-  //         .map((e) => e.chainId)
-  //         .toList();
-  //     final tonService = service.getChainService<TonService>(
-  //       chainId: chainIds.first,
-  //     );
-  //     final keyPair = await tonService.generateKeypairFromBip39Mnemonic(
-  //       mnemonic,
-  //     );
-  //     final address = await tonService.getAddressFromKeypair(
-  //       keyPair,
-  //     );
-
-  //     return ChainKey(
-  //       chains: chainIds,
-  //       privateKey: keyPair.sk,
-  //       publicKey: keyPair.pk,
-  //       address: address.friendlyEq,
-  //       namespace: 'ton_test',
-  //     );
-  //   } catch (e, s) {
-  //     debugPrint('[$runtimeType] _tonTestChainKey error: $e');
-  //     debugPrint('[$runtimeType] _tonTestChainKey error: $s');
-  //     return null;
-  //   }
-  // }
-
   ChainKey? _tronChainKey(String mnemonic) {
     try {
       final words = b_utils.Mnemonic(mnemonic.split(' '));
@@ -544,6 +494,66 @@ class KeyService extends IKeyService {
       return null;
     }
   }
+
+  Future<ChainKey?> _tonChainKey(String mnemonic) async {
+    try {
+      final service = GetIt.I<IWalletKitService>();
+      final chainIds = ChainsDataList.tonChains
+          .where((c) => !c.isTestnet)
+          .map((e) => e.chainId)
+          .toList();
+      final tonService = service.getChainService<TonService>(
+        chainId: chainIds.first,
+      );
+      final keyPair = await tonService.generateKeypairFromBip39Mnemonic(
+        mnemonic,
+      );
+      final address = await tonService.getAddressFromKeypair(keyPair);
+
+      return ChainKey(
+        chains: chainIds,
+        privateKey: keyPair.sk,
+        publicKey: keyPair.pk,
+        address: address.friendlyEq,
+        namespace: 'ton',
+      );
+    } catch (e, s) {
+      debugPrint('[$runtimeType] _tonChainKey error: $e');
+      debugPrint('[$runtimeType] _tonChainKey error: $s');
+      return null;
+    }
+  }
+
+  // Future<ChainKey?> _tonTestChainKey(String mnemonic) async {
+  //   try {
+  //     final service = GetIt.I<IWalletKitService>();
+  //     final chainIds = ChainsDataList.tonChains
+  //         .where((c) => c.isTestnet)
+  //         .map((e) => e.chainId)
+  //         .toList();
+  //     final tonService = service.getChainService<TonService>(
+  //       chainId: chainIds.first,
+  //     );
+  //     final keyPair = await tonService.generateKeypairFromBip39Mnemonic(
+  //       mnemonic,
+  //     );
+  //     final address = await tonService.getAddressFromKeypair(
+  //       keyPair,
+  //     );
+
+  //     return ChainKey(
+  //       chains: chainIds,
+  //       privateKey: keyPair.sk,
+  //       publicKey: keyPair.pk,
+  //       address: address.friendlyEq,
+  //       namespace: 'ton_test',
+  //     );
+  //   } catch (e, s) {
+  //     debugPrint('[$runtimeType] _tonTestChainKey error: $e');
+  //     debugPrint('[$runtimeType] _tonTestChainKey error: $s');
+  //     return null;
+  //   }
+  // }
 
   Future<ChainKey?> _stacksChainKey(String mnemonic) async {
     try {

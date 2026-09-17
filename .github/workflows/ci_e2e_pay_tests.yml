@@ -1,0 +1,460 @@
+name: E2E Pay Tests
+# "(skip-metrics)" tells the E2E KPI job (WalletConnect/actions) to drop this run.
+run-name: "E2E Pay Tests (${{ github.event.inputs.platform || 'both' }})${{ ((github.event_name == 'pull_request' && github.event.pull_request.draft) || (github.event_name == 'workflow_dispatch' && github.ref_name != 'develop')) && ' (skip-metrics)' || '' }}"
+
+permissions:
+  contents: read
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform(s) to run pay E2E tests'
+        required: false
+        type: choice
+        options:
+          - both
+          - android
+          - ios
+        default: both
+  pull_request:
+    types:
+      - opened
+      - synchronize
+      - reopened
+      - ready_for_review
+    paths:
+      - 'packages/reown_walletkit/example/**'
+      - 'packages/walletconnect_pay/**'
+      - '.github/workflows/ci_e2e_pay_tests.yml'
+  schedule:
+    # Run daily at 07:00 UTC
+    - cron: '0 7 * * *'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref_name }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  check-balance:
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    uses: ./.github/workflows/e2e_balance_check.yml
+    secrets: inherit
+
+  pay-tests-android:
+    needs: check-balance
+    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform != 'ios')) }}
+    runs-on: ubuntu-16core
+    timeout-minutes: 45
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Enable KVM
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Install Java 17
+        uses: actions/setup-java@v3
+        with:
+          distribution: 'zulu'
+          java-version: '17'
+          architecture: x86_64
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.3"
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('packages/reown_walletkit/example/android/**/*.gradle*', 'packages/reown_walletkit/example/android/**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Cache Pub
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('packages/reown_walletkit/example/pubspec.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-pub-
+
+      - name: Get wallet dependencies
+        working-directory: packages/reown_walletkit/example
+        run: flutter pub get
+
+      - name: Add Secrets file
+        working-directory: packages/reown_walletkit/example/android
+        run: touch secrets.properties && echo "${{ secrets.SECRETS_FILE }}" >> secrets.properties
+
+      - name: Add Keystore file
+        working-directory: packages/reown_walletkit/example/android
+        run: echo "${{ secrets.KEYSTORE }}" | base64 --decode >> app/debug.keystore
+
+      - name: Build APK with test mode
+        id: build
+        working-directory: packages/reown_walletkit/example
+        run: |
+          flutter build apk \
+            --flavor internal \
+            --dart-define="PROJECT_ID=${{ secrets.WALLET_PROJECT_ID }}" \
+            --dart-define="ENABLE_TEST_MODE=true" \
+            --dart-define="TEST_WALLET_PRIVATE_KEY=${{ secrets.TEST_WALLET_PRIVATE_KEY }}" \
+            --release \
+            --target-platform android-x64 \
+            --split-per-abi
+
+      - name: Copy Maestro Pay test flows
+        uses: WalletConnect/actions/maestro/pay-tests@4be7c0112f9651fc63b18c137650b75d2fc9b200
+
+      - name: Install Maestro CLI
+        uses: WalletConnect/actions/maestro/setup@4be7c0112f9651fc63b18c137650b75d2fc9b200
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+        with:
+          # Override the action's default `packages` ("tools platform-tools").
+          # Google removed the deprecated `tools` package from the SDK repo, so
+          # `sdkmanager tools` now fails with "Failed to find package 'tools'".
+          packages: platform-tools
+
+      - name: Run emulator and tests
+        id: maestro
+        uses: reactivecircus/android-emulator-runner@v2
+        env:
+          APP_ID: com.walletconnect.flutterwallet.internal
+          WPAY_CUSTOMER_KEY_SINGLE_NOKYC: ${{ secrets.WPAY_CUSTOMER_KEY_SINGLE_NOKYC }}
+          WPAY_MERCHANT_ID_SINGLE_NOKYC: ${{ secrets.WPAY_MERCHANT_ID_SINGLE_NOKYC }}
+          WPAY_CUSTOMER_KEY_MULTI_NOKYC: ${{ secrets.WPAY_CUSTOMER_KEY_MULTI_NOKYC }}
+          WPAY_MERCHANT_ID_MULTI_NOKYC: ${{ secrets.WPAY_MERCHANT_ID_MULTI_NOKYC }}
+          WPAY_CUSTOMER_KEY_MULTI_KYC: ${{ secrets.WPAY_CUSTOMER_KEY_MULTI_KYC }}
+          WPAY_MERCHANT_ID_MULTI_KYC: ${{ secrets.WPAY_MERCHANT_ID_MULTI_KYC }}
+        with:
+          api-level: 34
+          arch: x86_64
+          target: default
+          profile: pixel_6
+          ram-size: 4096M
+          disk-size: 4096M
+          heap-size: 576M
+          avd-name: test_device
+          force-avd-creation: false
+          disable-animations: true
+          emulator-boot-timeout: 900
+          emulator-options: -no-snapshot-save -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot-load
+          script: |
+            mkdir -p /tmp/maestro-output
+            adb logcat -c
+            adb logcat > /tmp/logcat.txt 2>&1 &
+            adb install -r packages/reown_walletkit/example/build/app/outputs/flutter-apk/app-x86_64-internal-release.apk
+            maestro test --include-tags pay --env "APP_ID=$APP_ID" --env "WPAY_CUSTOMER_KEY_SINGLE_NOKYC=$WPAY_CUSTOMER_KEY_SINGLE_NOKYC" --env "WPAY_MERCHANT_ID_SINGLE_NOKYC=$WPAY_MERCHANT_ID_SINGLE_NOKYC" --env "WPAY_CUSTOMER_KEY_MULTI_NOKYC=$WPAY_CUSTOMER_KEY_MULTI_NOKYC" --env "WPAY_MERCHANT_ID_MULTI_NOKYC=$WPAY_MERCHANT_ID_MULTI_NOKYC" --env "WPAY_CUSTOMER_KEY_MULTI_KYC=$WPAY_CUSTOMER_KEY_MULTI_KYC" --env "WPAY_MERCHANT_ID_MULTI_KYC=$WPAY_MERCHANT_ID_MULTI_KYC" --test-output-dir /tmp/maestro-output .maestro/
+
+      # Reset the USDT Permit2 allowance back to 0 so the next pay_usdt_polygon
+      # run re-exercises the on-chain approve step. Runs even when the suite
+      # failed (if: always()) so a mid-flow failure doesn't leave the allowance
+      # set; continue-on-error so a reset hiccup can't fail an otherwise-green
+      # run. Node step (signs a tx) — the private key goes via env, never the CLI.
+      - name: Reset USDT Permit2 allowance (Polygon)
+        if: always()
+        continue-on-error: true
+        uses: WalletConnect/actions/maestro/permit2-reset@4be7c0112f9651fc63b18c137650b75d2fc9b200
+        with:
+          chain-id: eip155:137
+          rpc-url: https://polygon-bor-rpc.publicnode.com
+          token-address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F'
+          private-key: ${{ secrets.TEST_WALLET_PRIVATE_KEY }}
+
+      # Clean up APK before uploading artifacts — never upload APK/IPA
+      - name: Clean up build artifacts
+        if: always()
+        run: rm -rf packages/reown_walletkit/example/build/
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pay-tests-debug-android
+          path: |
+            /tmp/logcat.txt
+            /tmp/maestro-output/**/*.png
+            /tmp/maestro-output/**/*.jpg
+            /tmp/maestro-output/**/*.jpeg
+            /tmp/maestro-output/**/*.mp4
+            /tmp/maestro-output/**/*.mov
+            /tmp/maestro-output/**/*.webm
+            /tmp/maestro-output/**/*.gif
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Send Slack notification
+        if: failure()
+        uses: slackapi/slack-github-action@b0fa283ad8fea605de13dc3f449259339835fc52 # v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "E2E Test Report - Android Pay - WalletKit Flutter",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "🧪 E2E Test Report - Android (pay)" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Project:*\n`WalletKit Flutter`" },
+                    { "type": "mrkdwn", "text": "*Platform:*\n`Android`" },
+                    { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
+                    { "type": "mrkdwn", "text": "*Trigger:*\n`${{ github.event_name }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Build:*\n`${{ steps.build.outcome == 'success' && '✅ Success' || '❌ Failed' }}`" },
+                    { "type": "mrkdwn", "text": "*Maestro Tests:*\n`${{ steps.maestro.outcome == 'success' && '✅ Passed' || '❌ Failed' }}`" },
+                    { "type": "mrkdwn", "text": "*Overall Status:*\n`${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}`" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "View Workflow Run" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "Download Artifacts" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
+                    }
+                  ]
+                }
+              ]
+            }
+
+  pay-tests-ios:
+    needs: check-balance
+    if: ${{ always() && ((github.event_name == 'pull_request' && github.event.pull_request.draft == false) || github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && github.event.inputs.platform != 'android')) }}
+    runs-on: macos-latest-xlarge
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Select Xcode 26 (iOS 26 SDK)
+        uses: maxim-lobanov/setup-xcode@v1
+        with:
+          xcode-version: '26'
+
+      - name: Boot iOS simulator
+        run: |
+          # Pick whatever iPhone simulator the runner actually has, so this
+          # doesn't break each time the Xcode/runner image bumps the model.
+          SIMULATOR_UDID=$(xcrun simctl list devices available \
+            | grep -Eo 'iPhone[^(]*\([A-Fa-f0-9-]{36}\)' \
+            | grep -Eo '[A-Fa-f0-9-]{36}' | head -n 1)
+          if [ -z "$SIMULATOR_UDID" ]; then
+            echo "ERROR: no available iPhone simulator found"
+            xcrun simctl list devices available
+            exit 1
+          fi
+          echo "Using simulator: $SIMULATOR_UDID"
+          xcrun simctl boot "$SIMULATOR_UDID" 2>/dev/null || true
+          # Wait for full boot before configuring the simulator
+          xcrun simctl bootstatus "$SIMULATOR_UDID" -b
+          # Disable UIKit animations to reduce Maestro timing flakiness.
+          # Target the UDID we just booted, not `booted` — if the runner has
+          # another simulator up, `booted` is ambiguous (simctl errors on
+          # multiple) and could configure the wrong device.
+          xcrun simctl spawn "$SIMULATOR_UDID" defaults write com.apple.UIKit UIAnimationDragCoefficient -float 0 || true
+
+      - name: Install Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.38.3"
+
+      - name: Get wallet dependencies
+        working-directory: packages/reown_walletkit/example
+        run: flutter pub get
+
+      - name: Refresh CocoaPods specs
+        run: pod repo update --silent
+
+      # Two-step iOS simulator build: let Flutter emit Dart kernel +
+      # Generated.xcconfig, then drive xcodebuild ourselves. The custom
+      # xcodebuild step exists only to pin ARCHS=x86_64 for the
+      # mobile_scanner/MLKit simulator slice (see the build step below) —
+      # `flutter build ios --simulator` can't override ARCHS. The build is
+      # unsigned: the pay suite no longer exercises Universal Links, so no
+      # associated-domains entitlement needs to survive.
+      - name: Prepare Flutter iOS artifacts
+        working-directory: packages/reown_walletkit/example
+        run: |
+          flutter build ios \
+            --config-only \
+            --flavor internal \
+            --simulator \
+            --debug \
+            --dart-define="PROJECT_ID=${{ secrets.WALLET_PROJECT_ID }}" \
+            --dart-define="ENABLE_TEST_MODE=true" \
+            --dart-define="TEST_WALLET_PRIVATE_KEY=${{ secrets.TEST_WALLET_PRIVATE_KEY }}"
+
+      - name: Install Pods
+        working-directory: packages/reown_walletkit/example/ios
+        run: pod install
+
+      - name: Build Runner.app via xcodebuild (unsigned)
+        id: build_ios
+        working-directory: packages/reown_walletkit/example/ios
+        # Build the simulator app for x86_64. mobile_scanner pulls in Google
+        # MLKit, whose .frameworks are fat binaries with an arm64-*device*
+        # slice and an x86_64-*simulator* slice, but NO arm64-simulator slice.
+        # On the Apple Silicon runner the default arm64 simulator build fails
+        # to link MLKit ("building for 'iOS-simulator', but linking in object
+        # file ... built for 'iOS'"). x86_64 is the only working simulator
+        # slice; it runs on the simulator via Rosetta 2. EXCLUDED_ARCHS alone
+        # isn't enough (arm64 is the standard arch here), so pin ARCHS=x86_64
+        # with ONLY_ACTIVE_ARCH=NO.
+        run: |
+          set -o pipefail && env NSUnbufferedIO=YES \
+            xcodebuild \
+              -workspace Runner.xcworkspace \
+              -scheme internal \
+              -configuration Debug-internal \
+              -sdk iphonesimulator \
+              -destination "generic/platform=iOS Simulator" \
+              -derivedDataPath ../build/ios-ddcache \
+              ARCHS=x86_64 \
+              ONLY_ACTIVE_ARCH=NO \
+              CODE_SIGNING_ALLOWED=NO \
+              build
+
+      - name: Install app on simulator
+        run: |
+          APP_PATH=$(find packages/reown_walletkit/example/build/ios-ddcache \
+            -name "Runner.app" -path "*/Debug-internal-iphonesimulator/*" | head -1)
+          if [ -z "$APP_PATH" ]; then
+            echo "ERROR: Runner.app not found in DerivedData"
+            find packages/reown_walletkit/example/build -name "Runner.app" || true
+            exit 1
+          fi
+          echo "Installing: $APP_PATH"
+          xcrun simctl install booted "$APP_PATH"
+
+      - name: Copy Maestro Pay test flows
+        uses: WalletConnect/actions/maestro/pay-tests@4be7c0112f9651fc63b18c137650b75d2fc9b200
+
+      - name: Install Maestro CLI
+        uses: WalletConnect/actions/maestro/setup@4be7c0112f9651fc63b18c137650b75d2fc9b200
+
+      - name: Run Maestro iOS tests
+        id: maestro_ios
+        run: |
+          maestro test \
+            --env APP_ID=com.walletconnect.flutterwallet.internal \
+            --env WPAY_CUSTOMER_KEY_SINGLE_NOKYC=${{ secrets.WPAY_CUSTOMER_KEY_SINGLE_NOKYC }} \
+            --env WPAY_MERCHANT_ID_SINGLE_NOKYC=${{ secrets.WPAY_MERCHANT_ID_SINGLE_NOKYC }} \
+            --env WPAY_CUSTOMER_KEY_MULTI_NOKYC=${{ secrets.WPAY_CUSTOMER_KEY_MULTI_NOKYC }} \
+            --env WPAY_MERCHANT_ID_MULTI_NOKYC=${{ secrets.WPAY_MERCHANT_ID_MULTI_NOKYC }} \
+            --env WPAY_CUSTOMER_KEY_MULTI_KYC=${{ secrets.WPAY_CUSTOMER_KEY_MULTI_KYC }} \
+            --env WPAY_MERCHANT_ID_MULTI_KYC=${{ secrets.WPAY_MERCHANT_ID_MULTI_KYC }} \
+            --include-tags pay \
+            --test-output-dir /tmp/maestro-output \
+            .maestro/
+
+      # Reset the USDT Permit2 allowance back to 0 so the next pay_usdt_polygon
+      # run re-exercises the on-chain approve step. Runs even when the suite
+      # failed (if: always()) so a mid-flow failure doesn't leave the allowance
+      # set; continue-on-error so a reset hiccup can't fail an otherwise-green
+      # run. Node step (signs a tx) — the private key goes via env, never the CLI.
+      - name: Reset USDT Permit2 allowance (Polygon)
+        if: always()
+        continue-on-error: true
+        uses: WalletConnect/actions/maestro/permit2-reset@4be7c0112f9651fc63b18c137650b75d2fc9b200
+        with:
+          chain-id: eip155:137
+          rpc-url: https://polygon-bor-rpc.publicnode.com
+          token-address: '0xc2132D05D31c914a87C6611C10748AEb04B58e8F'
+          private-key: ${{ secrets.TEST_WALLET_PRIVATE_KEY }}
+
+      # Clean up app build before uploading artifacts — never upload APK/IPA
+      - name: Clean up build artifacts
+        if: always()
+        run: rm -rf packages/reown_walletkit/example/build/
+
+      - name: Upload debug artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pay-tests-debug-ios
+          path: |
+            /tmp/maestro-output/**/*.png
+            /tmp/maestro-output/**/*.jpg
+            /tmp/maestro-output/**/*.jpeg
+            /tmp/maestro-output/**/*.mp4
+            /tmp/maestro-output/**/*.mov
+            /tmp/maestro-output/**/*.webm
+            /tmp/maestro-output/**/*.gif
+          retention-days: 14
+          if-no-files-found: ignore
+
+      - name: Send Slack notification
+        if: failure()
+        uses: slackapi/slack-github-action@b0fa283ad8fea605de13dc3f449259339835fc52 # v2.1.0
+        with:
+          webhook: ${{ secrets.SLACK_WEBHOOK_URL }}
+          webhook-type: incoming-webhook
+          payload: |
+            {
+              "text": "E2E Test Report - iOS Pay - WalletKit Flutter",
+              "blocks": [
+                {
+                  "type": "header",
+                  "text": { "type": "plain_text", "text": "🧪 E2E Test Report - iOS (pay)" }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Project:*\n`WalletKit Flutter`" },
+                    { "type": "mrkdwn", "text": "*Platform:*\n`iOS`" },
+                    { "type": "mrkdwn", "text": "*Branch:*\n`${{ github.ref_name }}`" },
+                    { "type": "mrkdwn", "text": "*Trigger:*\n`${{ github.event_name }}`" }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    { "type": "mrkdwn", "text": "*Build:*\n`${{ steps.build_ios.outcome == 'success' && '✅ Success' || '❌ Failed' }}`" },
+                    { "type": "mrkdwn", "text": "*Maestro Tests:*\n`${{ steps.maestro_ios.outcome == 'success' && '✅ Passed' || '❌ Failed' }}`" },
+                    { "type": "mrkdwn", "text": "*Overall Status:*\n`${{ job.status == 'success' && '✅ Success' || '❌ Failed' }}`" }
+                  ]
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "View Workflow Run" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": { "type": "plain_text", "text": "Download Artifacts" },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}#artifacts"
+                    }
+                  ]
+                }
+              ]
+            }

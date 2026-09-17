@@ -54,5 +54,10 @@ app.*.map.json
 **/*.keystore
 
 # Run scripts
-run_tests.sh
+# run_tests.sh
 *.env.secret
+
+# Example apps are applications: their pubspec.lock is committed so pub
+# resolution is deterministic across CI and dev machines (the package's own
+# lockfile above stays ignored, per pub guidance for libraries)
+!example/pubspec.lock

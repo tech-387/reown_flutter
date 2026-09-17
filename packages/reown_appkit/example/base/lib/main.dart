@@ -200,7 +200,7 @@ class _MyHomePageState extends State<MyHomePage> {
   }
 
   String _universalLink() {
-    Uri link = Uri.parse('https://appkit-lab.reown.com/flutter_appkit');
+    Uri link = Uri.parse('https://lab.reown.com/flutter_appkit');
     if (_flavor.isNotEmpty || kDebugMode) {
       return link.replace(path: '${link.path}_internal').toString();
     }
@@ -407,6 +407,17 @@ class _MyHomePageState extends State<MyHomePage> {
 
     await _appKitModal!.init();
     await _registerEventHandlers();
+
+    // CONFIGURE THE FEATURE BEFORE USING IT
+    final filteredAssets = _appKitModal!.getPaymentAssetsForNetwork(
+      // chainId: widget.appKitModal.selectedChain?.chainId,
+      includeNative: true,
+      includeTest: true,
+    );
+    _appKitModal!.configDeposit(
+      supportedAssets: filteredAssets,
+      filterByNetwork: false,
+    );
 
     DeepLinkHandler.init(_appKitModal!);
     DeepLinkHandler.checkInitialLink();

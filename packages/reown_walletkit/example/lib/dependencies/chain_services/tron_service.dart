@@ -39,16 +39,14 @@ class TronService {
   Future<void> tronSignMessage(String topic, dynamic parameters) async {
     debugPrint('[SampleWallet] tronSignMessage: $parameters');
     final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
     try {
       final params = parameters as Map<String, dynamic>;
       final address = params['address'].toString();
       final message = params['message'].toString();
 
+      final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
       if (await MethodsUtils.requestApproval(
         message,
         method: pRequest.method,
@@ -56,32 +54,23 @@ class TronService {
         address: address,
         transportType: pRequest.transportType.name,
         verifyContext: pRequest.verifyContext,
+        requester: requester,
       )) {
         // Convert signature to hex string (r, s, v) → 65 bytes
         final signatureHex = await signMessage(message);
 
-        response = response.copyWith(
-          result: {
-            'signature': signatureHex,
-          },
-        );
+        response = response.copyWith(result: {'signature': signatureHex});
       } else {
         final error = Errors.getSdkError(Errors.USER_REJECTED);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } catch (e) {
       debugPrint('[SampleWallet] tronSignMessage error $e');
       final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -108,10 +97,7 @@ class TronService {
   Future<void> tronSignTransaction(String topic, dynamic parameters) async {
     debugPrint('[SampleWallet] tronSignTransaction: ${jsonEncode(parameters)}');
     final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
     final params = parameters as Map<String, dynamic>;
     final address = params['address'] as String;
@@ -121,6 +107,7 @@ class TronService {
 
     const encoder = JsonEncoder.withIndent('  ');
     final message = encoder.convert(transactionJson);
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       message,
       method: pRequest.method,
@@ -128,6 +115,7 @@ class TronService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final keys = GetIt.I<IKeyService>().getKeysForChain(
@@ -148,26 +136,18 @@ class TronService {
         transactionJson['signature'] = [hexSignature];
 
         // Return signed tx
-        response = response.copyWith(
-          result: transactionJson,
-        );
+        response = response.copyWith(result: transactionJson);
       } catch (e) {
         debugPrint('[SampleWallet] tronSignTransaction error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -182,10 +162,7 @@ class TronService {
     final url = '$apiEndpoint/wallet/getaccount';
     final response = await http.post(
       Uri.parse(url),
-      body: jsonEncode({
-        'address': address,
-        'visible': true,
-      }),
+      body: jsonEncode({'address': address, 'visible': true}),
       headers: {'accept': 'application/json'},
     );
     try {
@@ -202,9 +179,9 @@ class TronService {
         ? 'https://nile.trongrid.io'
         : 'https://api.trongrid.io';
 
-    final url = '$apiEndpoint/v1/accounts/$address';
-    final response = await http.get(Uri.parse(url));
     try {
+      final url = '$apiEndpoint/v1/accounts/$address';
+      final response = await http.get(Uri.parse(url));
       final parsedResponse = jsonDecode(response.body) as Map<String, dynamic>;
       final data = parsedResponse['data'] as List;
       if (data.isEmpty) {
@@ -241,7 +218,7 @@ class TronService {
       body: jsonEncode({
         'account_identifier': {'address': address},
         'block_identifier': {'hash': blockID, 'number': blockNumber},
-        'visible': true
+        'visible': true,
       }),
       headers: {'accept': 'application/json'},
     );
@@ -266,10 +243,7 @@ class TronService {
     final session = _walletKit.sessions.get(topic);
 
     try {
-      await _walletKit.respondSessionRequest(
-        topic: topic,
-        response: response,
-      );
+      await _walletKit.respondSessionRequest(topic: topic, response: response);
       MethodsUtils.handleRedirect(
         topic,
         session!.peer.metadata.redirect,

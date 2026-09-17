@@ -15,7 +15,6 @@ import 'package:reown_walletkit_wallet/models/chain_data.dart';
 import 'package:reown_walletkit_wallet/models/chain_metadata.dart';
 import 'package:reown_walletkit_wallet/utils/eth_utils.dart';
 import 'package:reown_walletkit_wallet/utils/methods_utils.dart';
-import 'package:reown_walletkit_wallet/widgets/wc_connection_widget/wc_connection_model.dart';
 
 enum SupportedEVMMethods {
   ethSign,
@@ -115,10 +114,8 @@ class EVMService {
   }
 
   EthPrivateKey get _credentials {
-    final keys = GetIt.I<IKeyService>().getKeysForChain(
-      chainSupported.chainId,
-    );
-    final pk = '0x${keys[0].privateKey}';
+    final keys = GetIt.I<IKeyService>().getKeysForChain(chainSupported.chainId);
+    final pk = keys[0].privateKey;
     return EthPrivateKey.fromHex(pk);
   }
 
@@ -130,11 +127,9 @@ class EVMService {
     final address = EthUtils.getAddressFromSessionRequest(pRequest);
     final data = EthUtils.getDataFromSessionRequest(pRequest);
     final message = EthUtils.getUtf8Message(data.toString());
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       message,
       method: pRequest.method,
@@ -142,6 +137,7 @@ class EVMService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final signedTx = signMessage(message);
@@ -154,19 +150,13 @@ class EVMService {
         // TODO document errors
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -177,10 +167,7 @@ class EVMService {
     final signature = _credentials.signPersonalMessageToUint8List(
       utf8.encode(message),
     );
-    return eth_sig_util_util.bytesToHex(
-      signature,
-      include0x: true,
-    );
+    return eth_sig_util_util.bytesToHex(signature, include0x: true);
   }
 
   Future<void> ethSignHandler(String topic, dynamic parameters) async {
@@ -189,11 +176,9 @@ class EVMService {
     final address = EthUtils.getAddressFromSessionRequest(pRequest);
     final data = EthUtils.getDataFromSessionRequest(pRequest);
     final message = EthUtils.getUtf8Message(data.toString());
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       message,
       method: pRequest.method,
@@ -201,11 +186,10 @@ class EVMService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
-        final signature = _credentials.signToUint8List(
-          utf8.encode(message),
-        );
+        final signature = _credentials.signToUint8List(utf8.encode(message));
         final signedTx = eth_sig_util_util.bytesToHex(
           signature,
           include0x: true,
@@ -218,19 +202,13 @@ class EVMService {
         debugPrint('[SampleWallet] ethSign error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED).toSignError();
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -242,11 +220,9 @@ class EVMService {
     final pRequest = _walletKit.pendingRequests.getAll().last;
     final address = EthUtils.getAddressFromSessionRequest(pRequest);
     final data = EthUtils.getDataFromSessionRequest(pRequest);
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       data,
       method: pRequest.method,
@@ -254,6 +230,7 @@ class EVMService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final keys = GetIt.I<IKeyService>().getKeysForChain(
@@ -271,23 +248,156 @@ class EVMService {
         debugPrint('[SampleWallet] ethSignTypedData error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED).toSignError();
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
     _handleResponseForTopic(topic, response);
+  }
+
+  String _normalizeHexValues(String jsonString) {
+    // The eth_sig_util_plus library expects hex values to have an even number of digits after 0x (e.g., 0x0186a0). Some values in the typed data have an odd number (e.g., 0x186a0), which causes a parsing error.
+    // The solution uses a regex to find all hex strings in the JSON ("0x...") and pads odd-length values with a leading zero. This ensures all hex values are valid before signing.
+    // Pad odd-length hex values (e.g., "0x186a0" -> "0x0186a0")
+    // The signing library requires hex values to have even number of digits
+    return jsonString.replaceAllMapped(RegExp(r'"0x([0-9a-fA-F]+)"'), (match) {
+      final hex = match.group(1)!;
+      // Pad with leading zero if odd length
+      return hex.length % 2 == 0 ? match.group(0)! : '"0x0$hex"';
+    });
+  }
+
+  String ethSignTypedDataV4(String jsonData) {
+    final keys = GetIt.I<IKeyService>().getKeysForChain(chainSupported.chainId);
+
+    final signature = eth_sig_util.EthSigUtil.signTypedData(
+      privateKey: keys[0].privateKey,
+      jsonData: _normalizeHexValues(jsonData),
+      version: eth_sig_util.TypedDataVersion.V4,
+    );
+    return signature;
+  }
+
+  // --- WalletConnect Pay helpers (Permit2 two-action flow) ---
+  //
+  // These are used by the sample's Pay flow to submit an ERC-20 `approve`
+  // transaction to Permit2 without showing the generic dapp-request approval
+  // sheet — the user already consented by tapping "Pay".
+
+  static final BigInt _polygonPriorityFloorWei = BigInt.from(30000000000); // 30 gwei
+  static final BigInt _defaultPriorityFloorWei = BigInt.from(1500000000); // 1.5 gwei
+
+  Future<({EtherAmount maxFeePerGas, EtherAmount maxPriorityFeePerGas})>
+      _getPayFees() async {
+    EtherAmount priority;
+    try {
+      final hex = await ethClient.makeRPCCall<String>(
+        'eth_maxPriorityFeePerGas',
+      );
+      priority = EtherAmount.fromBigInt(
+        EtherUnit.wei,
+        BigInt.parse(hex.replaceFirst('0x', ''), radix: 16),
+      );
+    } catch (_) {
+      priority = EtherAmount.zero();
+    }
+
+    final floor = chainSupported.chainId == 'eip155:137'
+        ? _polygonPriorityFloorWei
+        : _defaultPriorityFloorWei;
+    if (priority.getInWei < floor) {
+      priority = EtherAmount.fromBigInt(EtherUnit.wei, floor);
+    }
+
+    final block = await ethClient.getBlockInformation();
+    final baseFee = block.baseFeePerGas;
+    final maxFee = baseFee != null
+        ? EtherAmount.fromBigInt(
+            EtherUnit.wei,
+            baseFee.getInWei * BigInt.two + priority.getInWei,
+          )
+        : await ethClient.getGasPrice();
+    return (maxFeePerGas: maxFee, maxPriorityFeePerGas: priority);
+  }
+
+  Future<BigInt> _estimatePayGas(Transaction tx) async {
+    final gas = await ethClient.estimateGas(
+      sender: tx.from,
+      to: tx.to,
+      value: tx.value,
+      data: tx.data,
+    );
+    return gas * BigInt.from(6) ~/ BigInt.from(5);
+  }
+
+  /// Estimates the wei cost of the given Pay approval transaction, so the
+  /// review UI can display a "one-time approval fee" line. Returns null on
+  /// failure — callers should hide the row rather than block Pay.
+  Future<BigInt?> estimatePayApprovalFee(Map<String, dynamic> txParams) async {
+    try {
+      final tx = txParams.toTransaction();
+      final fees = await _getPayFees();
+      final gasLimit = await _estimatePayGas(tx);
+      return gasLimit * fees.maxFeePerGas.getInWei;
+    } catch (e) {
+      debugPrint('[SampleWallet] estimatePayApprovalFee failed: $e');
+      return null;
+    }
+  }
+
+  /// Sends the given Pay approval transaction and waits for the receipt.
+  /// Returns the transaction hash on success. Throws [PayApprovalFailed] when
+  /// the receipt reports a failed status, or [PayApprovalTimeout] when no
+  /// receipt is seen within 120s.
+  Future<String> sendPayTransaction(Map<String, dynamic> txParams) async {
+    final base = txParams.toTransaction();
+    final fees = await _getPayFees();
+    final gasLimit = await _estimatePayGas(base);
+    // The Permit2 approve tx is constructed server-side and can carry a
+    // nonce that's now stale (e.g. the user just sent another tx). Always
+    // override with the wallet's current pending nonce to avoid
+    // "nonce too low" / "nonce too high" RPC errors at broadcast time.
+    final pendingNonce = await ethClient.getTransactionCount(
+      _credentials.address,
+      atBlock: const BlockNum.pending(),
+    );
+    final tx = base.copyWith(
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      maxGas: gasLimit.toInt(),
+      nonce: pendingNonce,
+    );
+
+    final chainIdInt = int.parse(chainSupported.chainId.split(':').last);
+    final hash = await ethClient.sendTransaction(
+      _credentials,
+      tx,
+      chainId: chainIdInt,
+    );
+
+    const interval = Duration(seconds: 2);
+    const timeout = Duration(seconds: 120);
+    final deadline = DateTime.now().add(timeout);
+    while (DateTime.now().isBefore(deadline)) {
+      await Future.delayed(interval);
+      try {
+        final receipt = await ethClient.getTransactionReceipt(hash);
+        if (receipt == null) continue;
+        if (receipt.status == true) return hash;
+        throw PayApprovalFailed(hash);
+      } on PayApprovalFailed {
+        rethrow;
+      } catch (e) {
+        debugPrint('[SampleWallet] sendPayTransaction poll error: $e');
+      }
+    }
+    throw PayApprovalTimeout(hash);
   }
 
   Future<void> ethSignTypedDataV4Handler(
@@ -298,11 +408,9 @@ class EVMService {
     final pRequest = _walletKit.pendingRequests.getAll().last;
     final address = EthUtils.getAddressFromSessionRequest(pRequest);
     final data = EthUtils.getDataFromSessionRequest(pRequest);
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       data,
       method: pRequest.method,
@@ -310,27 +418,16 @@ class EVMService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
-        final keys = GetIt.I<IKeyService>().getKeysForChain(
-          chainSupported.chainId,
-        );
-
-        final signature = eth_sig_util.EthSigUtil.signTypedData(
-          privateKey: keys[0].privateKey,
-          jsonData: data,
-          version: eth_sig_util.TypedDataVersion.V4,
-        );
-
+        final signature = ethSignTypedDataV4(data);
         response = response.copyWith(result: signature);
       } catch (e) {
         debugPrint('[SampleWallet] ethSignTypedDataV4 error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
@@ -353,11 +450,9 @@ class EVMService {
     if (data == null) return;
     final address = EthUtils.getAddressFromSessionRequest(pRequest);
 
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     final transaction = await approveTransaction(
       data,
       method: pRequest.method,
@@ -365,6 +460,7 @@ class EVMService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     );
     if (transaction is Transaction) {
       try {
@@ -385,19 +481,13 @@ class EVMService {
       } on RPCError catch (e) {
         debugPrint('[SampleWallet] ethSignTransaction error $e');
         response = response.copyWith(
-          error: JsonRpcError(
-            code: e.errorCode,
-            message: e.message,
-          ),
+          error: JsonRpcError(code: e.errorCode, message: e.message),
         );
       } catch (e) {
         debugPrint('[SampleWallet] ethSignTransaction error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
@@ -420,6 +510,7 @@ class EVMService {
     }
 
     // otherwise we continue with regular flow for eth_sendTransaction
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     await approveAndSendTransaction(
       pRequest.id,
       txParams,
@@ -427,6 +518,7 @@ class EVMService {
       pRequest.transportType.name,
       pRequest.verifyContext,
       topic,
+      requester: requester,
     );
   }
 
@@ -436,8 +528,9 @@ class EVMService {
     String chainId,
     String transportType,
     VerifyContext? verifyContext,
-    String topic,
-  ) async {
+    String topic, {
+    ConnectionMetadata? requester,
+  }) async {
     var response = JsonRpcResponse(id: requestId, jsonrpc: '2.0');
     final transaction = await approveTransaction(
       txParams,
@@ -445,6 +538,7 @@ class EVMService {
       chainId: chainId,
       transportType: transportType,
       verifyContext: verifyContext,
+      requester: requester,
     );
     if (transaction is Transaction) {
       try {
@@ -454,19 +548,13 @@ class EVMService {
       } on RPCError catch (e) {
         debugPrint('[SampleWallet] ethSendTransaction error $e');
         response = response.copyWith(
-          error: JsonRpcError(
-            code: e.errorCode,
-            message: e.message,
-          ),
+          error: JsonRpcError(code: e.errorCode, message: e.message),
         );
       } catch (e) {
         debugPrint('[SampleWallet] ethSendTransaction error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
@@ -493,19 +581,13 @@ class EVMService {
     } on ReownSignError catch (e) {
       debugPrint('[SampleWallet] switchChain error $e');
       response = response.copyWith(
-        error: JsonRpcError(
-          code: e.code,
-          message: e.message,
-        ),
+        error: JsonRpcError(code: e.code, message: e.message),
       );
     } catch (e) {
       debugPrint('[SampleWallet] switchChain error $e');
       final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -515,17 +597,16 @@ class EVMService {
   Future<void> addChainHandler(String topic, dynamic parameters) async {
     debugPrint('[SampleWallet] addChain request: $topic $parameters');
     final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       jsonEncode(parameters),
       method: pRequest.method,
       chainId: pRequest.chainId,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final params = (parameters as List).first as Map<String, dynamic>;
@@ -572,28 +653,19 @@ class EVMService {
       } on ReownSignError catch (e) {
         debugPrint('[SampleWallet] addChain error $e');
         response = response.copyWith(
-          error: JsonRpcError(
-            code: e.code,
-            message: e.message,
-          ),
+          error: JsonRpcError(code: e.code, message: e.message),
         );
       } catch (e) {
         debugPrint('[SampleWallet] addChain error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -612,14 +684,15 @@ class EVMService {
 
   Future<dynamic> approveTransaction(
     Map<String, dynamic> tJson, {
-    String? title,
     String? method,
     String? chainId,
     String? address,
     VerifyContext? verifyContext,
     required String transportType,
+    ConnectionMetadata? requester,
   }) async {
     Transaction transaction = tJson.toTransaction();
+    String? gasValue;
 
     final gasPrice = await ethClient.getGasPrice();
     try {
@@ -635,30 +708,24 @@ class EVMService {
         gasPrice: gasPrice,
         maxGas: gasLimit.toInt(),
       );
+      final gasPriceGwei = gasPrice.getInWei ~/ BigInt.from(1000000000);
+      gasValue = '${gasPriceGwei.toString()} GWEI | $gasLimit';
     } on RPCError catch (e) {
       return JsonRpcError(code: e.errorCode, message: e.message);
     }
-
-    final gweiGasPrice = (transaction.gasPrice?.getInWei ?? BigInt.zero) /
-        BigInt.from(1000000000);
 
     const encoder = JsonEncoder.withIndent('  ');
     final trx = encoder.convert(tJson);
 
     if (await MethodsUtils.requestApproval(
       trx,
-      title: title,
       method: method,
       chainId: chainId,
       address: address,
       transportType: transportType,
       verifyContext: verifyContext,
-      extraModels: [
-        WCConnectionModel(
-          title: 'Gas price',
-          elements: ['${gweiGasPrice.toStringAsFixed(2)} GWEI'],
-        ),
-      ],
+      requester: requester,
+      gasValue: gasValue,
     )) {
       return transaction;
     }
@@ -680,46 +747,6 @@ class EVMService {
     );
 
     return signature;
-  }
-
-  Future<dynamic> getBalance({required String address}) async {
-    final uri = Uri.parse('https://rpc.walletconnect.org/v1');
-    final queryParams = {
-      'projectId': _walletKit.core.projectId,
-      'chainId': chainSupported.chainId
-    };
-    final response = await http.post(
-      uri.replace(queryParameters: queryParams),
-      headers: {'Content-Type': 'application/json'},
-      body: jsonEncode({
-        'id': 1,
-        'jsonrpc': '2.0',
-        'method': 'eth_getBalance',
-        'params': [address, 'latest'],
-      }),
-    );
-    if (response.statusCode == 200 && response.body.isNotEmpty) {
-      try {
-        final result = _parseRpcResultAs<String>(response.body);
-        final amount = EtherAmount.fromBigInt(
-          EtherUnit.wei,
-          hexToInt(result),
-        );
-        return amount.getValueInUnit(EtherUnit.ether);
-      } catch (e) {
-        throw Exception('Failed to load balance. $e');
-      }
-    }
-    try {
-      final errorData = jsonDecode(response.body) as Map<String, dynamic>;
-      final reasons = errorData['reasons'] as List<dynamic>;
-      final reason = reasons.isNotEmpty
-          ? reasons.first['description'] ?? ''
-          : response.body;
-      throw Exception(reason);
-    } catch (e) {
-      rethrow;
-    }
   }
 
   // Validate signatures
@@ -781,20 +808,6 @@ class EVMService {
     }
   }
 
-  T _parseRpcResultAs<T>(String body) {
-    try {
-      final result = Map<String, dynamic>.from({...jsonDecode(body), 'id': 1});
-      final jsonResponse = JsonRpcResponse.fromJson(result);
-      if (jsonResponse.result != null) {
-        return jsonResponse.result;
-      } else {
-        throw jsonResponse.error ?? 'Error parsing result';
-      }
-    } catch (e) {
-      rethrow;
-    }
-  }
-
   void _handleResponseForTopic(String topic, JsonRpcResponse response) async {
     if (topic.isEmpty) {
       return MethodsUtils.handleRedirect(
@@ -806,10 +819,7 @@ class EVMService {
     }
     final session = _walletKit.sessions.get(topic);
     try {
-      await _walletKit.respondSessionRequest(
-        topic: topic,
-        response: response,
-      );
+      await _walletKit.respondSessionRequest(topic: topic, response: response);
       MethodsUtils.handleRedirect(
         topic,
         session!.peer.metadata.redirect,
@@ -853,4 +863,19 @@ class EVMService {
     updatedNamespaces[namespace] = newNamespaces;
     return updatedNamespaces;
   }
+}
+
+class PayApprovalFailed implements Exception {
+  PayApprovalFailed(this.hash);
+  final String hash;
+  @override
+  String toString() => 'Approval transaction failed ($hash)';
+}
+
+class PayApprovalTimeout implements Exception {
+  PayApprovalTimeout(this.hash);
+  final String hash;
+  @override
+  String toString() =>
+      'Approval transaction timed out waiting for confirmation ($hash)';
 }

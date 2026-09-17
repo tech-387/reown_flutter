@@ -1,7 +1,11 @@
 import 'dart:async';
 
+import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:get_it/get_it.dart';
+import 'package:sentry_flutter/sentry_flutter.dart';
+
+import 'package:flutter_svg/flutter_svg.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/bottom_sheet_listener.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/bottom_sheet_service.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/i_bottom_sheet_service.dart';
@@ -11,59 +15,62 @@ import 'package:reown_walletkit_wallet/dependencies/key_service/i_key_service.da
 import 'package:reown_walletkit_wallet/dependencies/key_service/key_service.dart';
 import 'package:reown_walletkit_wallet/dependencies/walletkit_service.dart';
 import 'package:reown_walletkit_wallet/models/page_data.dart';
+import 'package:reown_walletkit_wallet/pages/balances_page.dart';
 import 'package:reown_walletkit_wallet/pages/apps_page.dart';
 import 'package:reown_walletkit_wallet/pages/settings_page.dart';
+import 'package:reown_walletkit_wallet/theme/app_colors.dart';
+import 'package:reown_walletkit_wallet/theme/app_spacing.dart';
+import 'package:reown_walletkit_wallet/theme/app_theme.dart';
+import 'package:reown_walletkit_wallet/theme/theme_provider.dart';
 import 'package:reown_walletkit_wallet/utils/constants.dart';
-import 'package:flutter/material.dart';
 import 'package:reown_walletkit_wallet/utils/dart_defines.dart';
 import 'package:reown_walletkit_wallet/utils/string_constants.dart';
-import 'package:sentry_flutter/sentry_flutter.dart';
+import 'package:reown_walletkit_wallet/widgets/scan_modal.dart';
+import 'package:toastification/toastification.dart';
 
 final GlobalKey<NavigatorState> navigatorKey = GlobalKey<NavigatorState>();
 
 Future<void> main() async {
-  await runZonedGuarded<Future<void>>(() async {
-    WidgetsFlutterBinding.ensureInitialized();
-    DeepLinkHandler.initListener();
+  await runZonedGuarded<Future<void>>(
+    () async {
+      WidgetsFlutterBinding.ensureInitialized();
 
-    if (kDebugMode) {
-      runApp(MyApp());
-    } else {
-      // Catch Flutter framework errors
-      FlutterError.onError = (FlutterErrorDetails details) {
-        FlutterError.presentError(details);
-        Sentry.captureException(details.exception, stackTrace: details.stack);
-      };
+      final themeProvider = ThemeProvider();
+      await themeProvider.init();
+      GetIt.I.registerSingleton<ThemeProvider>(themeProvider);
 
-      await SentryFlutter.init(
-        (options) {
+      DeepLinkHandler.initListener();
+
+      if (kDebugMode) {
+        runApp(MyApp());
+      } else {
+        // Catch Flutter framework errors
+        FlutterError.onError = (FlutterErrorDetails details) {
+          FlutterError.presentError(details);
+          Sentry.captureException(details.exception, stackTrace: details.stack);
+        };
+
+        await SentryFlutter.init((options) {
           options.dsn = DartDefines.sentryDSN;
           options.environment = kDebugMode ? 'debug_app' : 'deployed_app';
           options.attachScreenshot = true;
-          // Adds request headers and IP for users,
-          // visit: https://docs.sentry.io/platforms/dart/data-management/data-collected/ for more info
-          options.sendDefaultPii = true;
           // Set tracesSampleRate to 1.0 to capture 100% of transactions for tracing.
           // We recommend adjusting this value in production.
           options.tracesSampleRate = 1.0;
           // The sampling rate for profiling is relative to tracesSampleRate
           // Setting to 1.0 will profile 100% of sampled transactions:
           options.profilesSampleRate = 1.0;
-        },
-        appRunner: () => runApp(
-          SentryWidget(
-            child: const MyApp(),
-          ),
-        ),
-      );
-    }
-  }, (error, stackTrace) async {
-    if (!kDebugMode) {
-      await Sentry.captureException(error, stackTrace: stackTrace);
-    }
-    debugPrint('Uncaught error: $error');
-    debugPrint('Stack trace: $stackTrace');
-  });
+        }, appRunner: () => runApp(SentryWidget(child: const MyApp())));
+      }
+    },
+    (error, stackTrace) async {
+      if (!kDebugMode) {
+        await Sentry.captureException(error, stackTrace: stackTrace);
+      }
+      debugPrint('Uncaught error: $error');
+      debugPrint('Stack trace: $stackTrace');
+    },
+  );
 }
 
 class MyApp extends StatefulWidget {
@@ -73,9 +80,7 @@ class MyApp extends StatefulWidget {
   State<MyApp> createState() => _MyAppState();
 }
 
-class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
-  bool _isDarkMode = false;
-
+class _MyAppState extends State<MyApp> {
   @override
   void initState() {
     super.initState();
@@ -86,64 +91,39 @@ class _MyAppState extends State<MyApp> with WidgetsBindingObserver {
           builder: (context) => AlertDialog(content: Text(message)),
         ),
       );
-      WidgetsBinding.instance.addObserver(this);
-      WidgetsBinding.instance.addPostFrameCallback((_) {
-        setState(() {
-          final platformDispatcher = View.of(context).platformDispatcher;
-          final platformBrightness = platformDispatcher.platformBrightness;
-          _isDarkMode = platformBrightness == Brightness.dark;
-        });
-      });
     } catch (e, s) {
       Sentry.captureException(e, stackTrace: s);
     }
   }
 
   @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    super.dispose();
-  }
-
-  @override
-  void didChangePlatformBrightness() {
-    if (mounted) {
-      setState(() {
-        final platformDispatcher = View.of(context).platformDispatcher;
-        final platformBrightness = platformDispatcher.platformBrightness;
-        _isDarkMode = platformBrightness == Brightness.dark;
-      });
-    }
-    super.didChangePlatformBrightness();
-  }
-
-  @override
   Widget build(BuildContext context) {
-    return MaterialApp(
-      navigatorKey: navigatorKey,
-      navigatorObservers: [
-        SentryNavigatorObserver(),
-      ],
-      title: StringConstants.appTitle,
-      theme: ThemeData(
-        colorScheme: _isDarkMode
-            ? ColorScheme.dark(
-                primary: Color(0xFF667DFF),
-              )
-            : ColorScheme.light(
-                primary: Color(0xFF667DFF),
-              ),
-      ),
-      home: MyHomePage(
-        isDarkMode: _isDarkMode,
-      ),
+    final themeProvider = GetIt.I<ThemeProvider>();
+    return ListenableBuilder(
+      listenable: themeProvider,
+      builder: (context, _) {
+        return ToastificationWrapper(
+          child: MaterialApp(
+            navigatorKey: navigatorKey,
+            navigatorObservers: [SentryNavigatorObserver()],
+            title: StringConstants.appTitle,
+            theme: AppTheme.light(),
+            darkTheme: AppTheme.dark(),
+            themeMode: themeProvider.themeMode,
+            builder: (context, child) => DefaultTextStyle.merge(
+              style: const TextStyle(fontFamily: 'KH Teka'),
+              child: child ?? const SizedBox.shrink(),
+            ),
+            home: const MyHomePage(),
+          ),
+        );
+      },
     );
   }
 }
 
 class MyHomePage extends StatefulWidget {
-  MyHomePage({super.key, required this.isDarkMode});
-  final bool isDarkMode;
+  const MyHomePage({super.key});
 
   @override
   State<MyHomePage> createState() => _MyHomePageState();
@@ -168,29 +148,30 @@ class _MyHomePageState extends State<MyHomePage> {
         return keyService;
       });
       GetIt.I.registerSingleton<IWalletKitService>(WalletKitService());
-      await GetIt.I.allReady(timeout: Duration(seconds: 1));
+      await GetIt.I.allReady(timeout: Duration(seconds: 5));
 
       final walletKitService = GetIt.I<IWalletKitService>();
       await walletKitService.create();
+      await Future<void>.delayed(Duration.zero); // Yield to prevent UI hang
       await walletKitService.setUpAccounts();
+      await Future<void>.delayed(Duration.zero); // Yield to prevent UI hang
       await walletKitService.init();
 
       walletKitService.walletKit.core.relayClient.onRelayClientConnect
-          .subscribe(
-        _setState,
-      );
+          .subscribe(_setState);
       walletKitService.walletKit.core.relayClient.onRelayClientDisconnect
-          .subscribe(
-        _setState,
-      );
+          .subscribe(_setState);
       walletKitService.walletKit.core.connectivity.isOnline.addListener(
         _onLine,
       );
 
       _setPages();
 
-      // TODO _walletKit.core.echo.register(firebaseAccessToken);
-      DeepLinkHandler.checkInitialLink();
+      // Defer so BottomSheetListener mounts and subscribes before any
+      // cold-start pay link tries to queue a sheet.
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        DeepLinkHandler.checkInitialLink();
+      });
     } catch (e, s) {
       debugPrint('[$runtimeType] ❌ crash during initialize, $e, $s');
       await Sentry.captureException(e, stackTrace: s);
@@ -204,14 +185,19 @@ class _MyHomePageState extends State<MyHomePage> {
   void _setPages() => setState(() {
         _pageDatas = [
           PageData(
-            page: AppsPage(isDarkMode: widget.isDarkMode),
-            title: StringConstants.connectPageTitle,
-            icon: Icons.swap_vert_circle_outlined,
+            page: BalancesPage(),
+            title: 'Wallets',
+            svgIcon: 'assets/Wallet.svg',
+          ),
+          PageData(
+            page: AppsPage(),
+            title: 'Connected Apps',
+            svgIcon: 'assets/Stack.svg',
           ),
           PageData(
             page: const SettingsPage(),
             title: 'Settings',
-            icon: Icons.settings_outlined,
+            svgIcon: 'assets/Gear.svg',
           ),
         ];
       });
@@ -228,120 +214,204 @@ class _MyHomePageState extends State<MyHomePage> {
   @override
   Widget build(BuildContext context) {
     if (_pageDatas.isEmpty) {
-      return const Material(
+      return Material(
         child: Center(
-          child: CircularProgressIndicator(
-            color: StyleConstants.primaryColor,
-          ),
+          child: CircularProgressIndicator(color: context.colors.accent),
         ),
       );
     }
 
-    final List<Widget> navRail = [];
-    if (MediaQuery.of(context).size.width >= Constants.smallScreen) {
-      navRail.add(_buildNavigationRail());
-    }
-    navRail.add(
-      Expanded(
-        child: _pageDatas[_selectedIndex].page,
-      ),
-    );
+    final colors = context.colors;
+    final isWideScreen =
+        MediaQuery.of(context).size.width >= Constants.smallScreen;
 
     return Scaffold(
-      appBar: AppBar(
-        title: Text(_pageDatas[_selectedIndex].title),
-        actions: [
-          const Text('Relay '),
-          Builder(
-            builder: (context) {
-              final walletKit = GetIt.I<IWalletKitService>().walletKit;
-              return CircleAvatar(
-                radius: 6.0,
-                backgroundColor: walletKit.core.relayClient.isConnected &&
-                        walletKit.core.connectivity.isOnline.value
-                    ? Colors.green
-                    : Colors.red,
-              );
-            },
-          ),
-          const SizedBox(width: 16.0),
-        ],
-      ),
-      body: Stack(
-        children: [
-          BottomSheetListener(
-            child: Row(
-              mainAxisSize: MainAxisSize.max,
-              children: navRail,
-            ),
-          ),
-          ValueListenableBuilder(
-            valueListenable: DeepLinkHandler.waiting,
-            builder: (context, value, _) {
-              return Visibility(
-                visible: value,
-                child: Center(
-                  child: Container(
-                    decoration: const BoxDecoration(
-                      color: Colors.black38,
-                      borderRadius: BorderRadius.all(Radius.circular(50.0)),
-                    ),
-                    padding: const EdgeInsets.all(12.0),
-                    child: const CircularProgressIndicator(
-                      color: Colors.white,
+      body: SafeArea(
+        child: Column(
+          children: [
+            _buildHeader(colors),
+            Expanded(
+              child: Stack(
+                children: [
+                  BottomSheetListener(
+                    child: Row(
+                      children: [
+                        if (isWideScreen) _buildNavigationRail(colors),
+                        Expanded(child: _pageDatas[_selectedIndex].page),
+                      ],
                     ),
                   ),
+                  ValueListenableBuilder(
+                    valueListenable: DeepLinkHandler.waiting,
+                    builder: (context, value, _) {
+                      return Visibility(
+                        visible: value,
+                        child: Center(
+                          child: Container(
+                            decoration: BoxDecoration(
+                              color: colors.overlay,
+                              borderRadius:
+                                  BorderRadius.all(Radius.circular(50.0)),
+                            ),
+                            padding: const EdgeInsets.all(AppSpacing.s3),
+                            child: CircularProgressIndicator(
+                              color: colors.onAccent,
+                            ),
+                          ),
+                        ),
+                      );
+                    },
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+      bottomNavigationBar: isWideScreen ? null : _buildBottomNavBar(),
+    );
+  }
+
+  Widget _buildHeader(AppColors colors) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(
+          horizontal: AppSpacing.s4, vertical: AppSpacing.s3),
+      child: Row(
+        mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        children: [
+          // WalletConnect logo
+          Container(
+            width: 38.0,
+            height: 38.0,
+            decoration: BoxDecoration(
+              color: colors.accent,
+              shape: BoxShape.circle,
+            ),
+            alignment: Alignment.center,
+            child: SvgPicture.asset(
+              'assets/WalletConnect.svg',
+              width: 20,
+              colorFilter: ColorFilter.mode(
+                colors.onAccent,
+                BlendMode.srcIn,
+              ),
+            ),
+          ),
+          // Scan button
+          Semantics(
+            container: true,
+            identifier: 'button-scan',
+            label: 'button-scan',
+            child: GestureDetector(
+              onTap: _onScanPressed,
+              child: Container(
+                width: 38.0,
+                height: 38.0,
+                decoration: BoxDecoration(
+                  color: colors.backgroundInvert,
+                  borderRadius: BorderRadius.circular(12.0),
                 ),
-              );
-            },
+                alignment: Alignment.center,
+                child: SvgPicture.asset(
+                  'assets/Barcode.svg',
+                  width: 18.0,
+                  height: 18.0,
+                  colorFilter: ColorFilter.mode(
+                    colors.onBackgroundInvert,
+                    BlendMode.srcIn,
+                  ),
+                ),
+              ),
+            ),
           ),
         ],
       ),
-      bottomNavigationBar:
-          MediaQuery.of(context).size.width < Constants.smallScreen
-              ? _buildBottomNavBar()
-              : null,
     );
   }
 
-  Widget _buildBottomNavBar() {
-    return BottomNavigationBar(
-      currentIndex: _selectedIndex,
-      unselectedItemColor: Colors.grey,
-      selectedItemColor: Color(0xFF667DFF),
-      showUnselectedLabels: true,
-      type: BottomNavigationBarType.fixed,
-      // called when one tab is selected
-      onTap: (int index) => setState(
-        () => _selectedIndex = index,
-      ),
-      // bottom tab items
-      items: _pageDatas
-          .map(
-            (e) => BottomNavigationBarItem(
-              icon: Icon(e.icon),
-              label: e.title,
-            ),
-          )
-          .toList(),
+  void _onScanPressed() {
+    if (!GetIt.I.isRegistered<IBottomSheetService>()) return;
+    GetIt.I<IBottomSheetService>().queueBottomSheet(
+      widget: const ScanModal(),
     );
   }
 
-  Widget _buildNavigationRail() {
+  Widget _buildNavigationRail(AppColors colors) {
     return NavigationRail(
       selectedIndex: _selectedIndex,
-      onDestinationSelected: (int index) => setState(
-        () => _selectedIndex = index,
-      ),
+      onDestinationSelected: (int index) =>
+          setState(() => _selectedIndex = index),
       labelType: NavigationRailLabelType.selected,
+      backgroundColor: colors.background,
+      indicatorColor: Colors.transparent,
+      selectedIconTheme: IconThemeData(color: colors.backgroundInvert),
+      unselectedIconTheme: IconThemeData(color: colors.textSecondary),
       destinations: _pageDatas
           .map(
             (e) => NavigationRailDestination(
-              icon: Icon(e.icon),
+              icon: SvgPicture.asset(
+                e.svgIcon,
+                width: 24.0,
+                height: 24.0,
+                colorFilter: ColorFilter.mode(
+                  colors.textSecondary,
+                  BlendMode.srcIn,
+                ),
+              ),
+              selectedIcon: SvgPicture.asset(
+                e.svgIcon,
+                width: 24.0,
+                height: 24.0,
+                colorFilter: ColorFilter.mode(
+                  colors.backgroundInvert,
+                  BlendMode.srcIn,
+                ),
+              ),
               label: Text(e.title),
             ),
           )
           .toList(),
+    );
+  }
+
+  Widget _buildBottomNavBar() {
+    final colors = context.colors;
+    return Theme(
+      data: Theme.of(context).copyWith(
+        splashColor: Colors.transparent,
+        highlightColor: Colors.transparent,
+      ),
+      child: BottomNavigationBar(
+        currentIndex: _selectedIndex,
+        unselectedItemColor: colors.textSecondary,
+        selectedItemColor: colors.backgroundInvert,
+        selectedFontSize: 12.0,
+        unselectedFontSize: 12.0,
+        iconSize: 24.0,
+        showUnselectedLabels: true,
+        type: BottomNavigationBarType.fixed,
+        onTap: (int index) => setState(() => _selectedIndex = index),
+        items: _pageDatas.asMap().entries.map((entry) {
+          final isSelected = entry.key == _selectedIndex;
+          final e = entry.value;
+          return BottomNavigationBarItem(
+            icon: Padding(
+              padding: const EdgeInsets.only(
+                  top: AppSpacing.s2, bottom: AppSpacing.s1),
+              child: SvgPicture.asset(
+                e.svgIcon,
+                width: 24.0,
+                height: 24.0,
+                colorFilter: ColorFilter.mode(
+                  isSelected ? colors.backgroundInvert : colors.textSecondary,
+                  BlendMode.srcIn,
+                ),
+              ),
+            ),
+            label: e.title,
+          );
+        }).toList(),
+      ),
     );
   }
 }

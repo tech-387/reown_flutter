@@ -33,6 +33,17 @@ public class ReownYttriumUtilsPlugin: NSObject, FlutterPlugin {
             Stacks.signMessage(call.arguments ?? {}, result: result)
         case "stx_transferStx":
             Stacks.transferStx(call.arguments ?? {}, result: result)
+            // === SOLANA METHODS ===
+        case "solana_generateKeyPair":
+            Solana.generateKeyPair(call.arguments ?? {}, result: result)
+        case "solana_getPublicKey":
+            Solana.getPublicKey(call.arguments ?? {}, result: result)
+        case "solana_signTransaction":
+            Solana.signTransaction(call.arguments ?? {}, result: result)
+        case "solana_signAllTransactions":
+            Solana.signAllTransactions(call.arguments ?? {}, result: result)
+        case "solana_signMessage":
+            Solana.signMessage(call.arguments ?? {}, result: result)
             // === SUI METHODS ===
         case "sui_init":
             Sui.initialize(call.arguments ?? {}, result: result)
@@ -59,6 +70,8 @@ public class ReownYttriumUtilsPlugin: NSObject, FlutterPlugin {
             Ton.generateKeypairFromBip39Mnemonic(call.arguments ?? {}, result: result) // TODO
         case "ton_getAddressFromKeypair":
             Ton.getAddressFromKeypair(call.arguments ?? {}, result: result)
+        case "ton_getSessionProperties":
+            Ton.getSessionProperties(call.arguments ?? {}, result: result)
         case "ton_signData":
             Ton.signData(call.arguments ?? {}, result: result)
         case "ton_sendMessage":

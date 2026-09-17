@@ -46,7 +46,7 @@ android {
     }
 
     defaultConfig {
-        minSdk = 21
+        minSdk = 23
     }
 
     buildTypes {
@@ -77,10 +77,13 @@ android {
 }
 
 dependencies {
-    compileOnly("com.github.reown-com:yttrium:0.9.109") {
+    compileOnly("com.github.reown-com:yttrium:0.10.58") {
         exclude(group: 'net.java.dev.jna', module: 'jna')
     }
-//    implementation("net.java.dev.jna:jna:5.17.0@aar")
+    // compileOnly("com.github.reown-com:yttrium:unspecified") {
+    //     exclude(group: 'net.java.dev.jna', module: 'jna')
+    // }
+    // implementation("net.java.dev.jna:jna:5.17.0@aar")
 
     testImplementation("org.jetbrains.kotlin:kotlin-test")
     testImplementation("org.mockito:mockito-core:5.0.0")

@@ -19,12 +19,14 @@ class DeepLinkHandler {
   static final _errorStream = StreamController<String>();
   static Stream<String> get errorStream => _errorStream.stream;
 
+  /// Temporary interceptor for deep links. When set, incoming links are
+  /// checked against this callback first. If it returns true the link is
+  /// considered handled and normal processing is skipped.
+  static bool Function(Uri uri)? oneShotInterceptor;
+
   static void initListener() {
     if (kIsWeb) return;
-    _eventChannel.receiveBroadcastStream().listen(
-          _onLink,
-          onError: _onError,
-        );
+    _eventChannel.receiveBroadcastStream().listen(_onLink, onError: _onError);
   }
 
   static void checkInitialLink() async {
@@ -47,8 +49,40 @@ class DeepLinkHandler {
   //     Uri.parse(_walletKit.metadata.redirect?.universal ?? '');
   // static String get host => universalUri.host;
 
+  // Pay links reach the wallet via NFC (the NDEF_DISCOVERED intent-filter on
+  // Android / associated NFC delivery on iOS). Universal-link registration for
+  // these hosts was removed from AndroidManifest.xml / Runner.entitlements, so
+  // on native these URLs now arrive via NFC rather than a tapped App Link.
+  static const _payHosts = [
+    'pay.walletconnect.com',
+    'staging.pay.walletconnect.com',
+    'dev.pay.walletconnect.com',
+  ];
+
+  static bool _isPayLink(String link) {
+    final uri = Uri.tryParse(link);
+    if (uri == null) return false;
+    return _payHosts.contains(uri.host);
+  }
+
   static void _onLink(dynamic link) async {
     debugPrint('[WalletKit] [DeepLinkHandler] _onLink $link');
+
+    // Check one-shot interceptor first (used by in-app browser callback).
+    if (oneShotInterceptor != null) {
+      final uri = Uri.tryParse('$link');
+      if (uri != null && oneShotInterceptor!(uri)) {
+        oneShotInterceptor = null;
+        return;
+      }
+    }
+
+    // Route pay.walletconnect.com links through the payment flow.
+    if (_isPayLink('$link')) {
+      _handlePayLink('$link');
+      return;
+    }
+
     try {
       final serviceRegistered = GetIt.I.isRegistered<IWalletKitService>();
       if (serviceRegistered) {
@@ -57,6 +91,22 @@ class DeepLinkHandler {
       }
     } catch (e) {
       _relayConnetionUri(link);
+    }
+  }
+
+  static void _handlePayLink(String link) async {
+    try {
+      final serviceRegistered = GetIt.I.isRegistered<IWalletKitService>();
+      if (!serviceRegistered) return;
+
+      waiting.value = true;
+      final walletKitService = GetIt.I<IWalletKitService>();
+      await walletKitService.pair(link);
+    } catch (e) {
+      debugPrint('[WalletKit] [DeepLinkHandler] pay link error: $e');
+      _errorStream.sink.add(e.toString());
+    } finally {
+      waiting.value = false;
     }
   }
 

@@ -1,15 +1,15 @@
 import 'package:flutter/material.dart';
 import 'package:get_it/get_it.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/i_bottom_sheet_service.dart';
-import 'package:reown_walletkit_wallet/utils/constants.dart';
+import 'package:reown_walletkit_wallet/theme/app_colors.dart';
+import 'package:reown_walletkit_wallet/theme/app_radius.dart';
+import 'package:reown_walletkit_wallet/theme/app_spacing.dart';
+import 'package:reown_walletkit_wallet/walletconnect_pay/wcp_shared_widgets.dart';
 
 class BottomSheetListener extends StatefulWidget {
   final Widget child;
 
-  const BottomSheetListener({
-    super.key,
-    required this.child,
-  });
+  const BottomSheetListener({super.key, required this.child});
 
   @override
   BottomSheetListenerState createState() => BottomSheetListenerState();
@@ -34,10 +34,13 @@ class BottomSheetListenerState extends State<BottomSheetListener> {
   Future<void> _showBottomSheet() async {
     if (_bottomSheetService.currentSheet.value != null) {
       BottomSheetQueueItem item = _bottomSheetService.currentSheet.value!;
+      final colors = context.colors;
       final value = await showModalBottomSheet(
         context: context,
-        backgroundColor: StyleConstants.clear,
+        backgroundColor: Colors.transparent,
         isScrollControlled: true,
+        isDismissible: false,
+        enableDrag: item.enableDrag,
         constraints: BoxConstraints(
           maxHeight: MediaQuery.of(context).size.height * 0.9,
         ),
@@ -47,7 +50,7 @@ class BottomSheetListenerState extends State<BottomSheetListener> {
               try {
                 if (!mounted) return;
                 if (Navigator.canPop(context)) {
-                  Navigator.pop(context);
+                  Navigator.of(context).pop(WCBottomSheetResult.close.name);
                 }
               } catch (e) {
                 debugPrint('[$runtimeType] close $e');
@@ -55,32 +58,62 @@ class BottomSheetListenerState extends State<BottomSheetListener> {
             });
           }
           return Material(
-            borderRadius: BorderRadius.all(
-              Radius.circular(StyleConstants.linear16),
+            borderRadius: BorderRadius.only(
+              topLeft: Radius.circular(AppRadius.xl),
+              topRight: Radius.circular(AppRadius.xl),
             ),
+            color: colors.background,
             child: Padding(
               padding: EdgeInsets.only(
-                top: StyleConstants.linear16,
-                left: StyleConstants.linear16,
-                right: StyleConstants.linear16,
-                bottom: MediaQuery.of(context).viewInsets.bottom +
-                    StyleConstants.linear24,
+                top: AppSpacing.s5,
+                left: AppSpacing.s5,
+                right: AppSpacing.s5,
+                bottom:
+                    MediaQuery.of(context).viewInsets.bottom + AppSpacing.s5,
               ),
               child: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
                   Row(
-                    mainAxisAlignment: MainAxisAlignment.end,
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      IconButton(
-                        padding: const EdgeInsets.all(0.0),
-                        visualDensity: VisualDensity.compact,
-                        onPressed: () {
-                          if (Navigator.canPop(context)) {
-                            Navigator.pop(context);
-                          }
-                        },
-                        icon: const Icon(Icons.close_sharp),
+                      (item.showBackButton)
+                          ? Semantics(
+                              container: true,
+                              identifier: 'pay-button-back',
+                              label: 'pay-button-back',
+                              child: WCPSheetIconButton(
+                                icon: Icons.arrow_back,
+                                showBorder: false,
+                                onPressed: () {
+                                  if (Navigator.canPop(context)) {
+                                    Navigator.of(context)
+                                        .pop(WCBottomSheetResult.back.name);
+                                  }
+                                },
+                              ),
+                            )
+                          : item.leadingWidget ??
+                              const SizedBox(width: 38.0),
+                      (item.stepper.$1 > 0 && item.stepper.$2 > 0)
+                          ? WCPStepsIndicator(
+                              currentStep: item.stepper.$1,
+                              totalSteps: item.stepper.$2,
+                            )
+                          : const SizedBox(width: 38.0),
+                      Semantics(
+                        container: true,
+                        identifier: 'pay-button-close',
+                        label: 'pay-button-close',
+                        child: WCPSheetIconButton(
+                          icon: Icons.close,
+                          onPressed: () {
+                            if (Navigator.canPop(context)) {
+                              Navigator.of(context)
+                                  .pop(WCBottomSheetResult.close.name);
+                            }
+                          },
+                        ),
                       ),
                     ],
                   ),

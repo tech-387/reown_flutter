@@ -1,5 +1,12 @@
+# Use the CocoaPods CDN. The legacy git Specs repo requires cloning ~837k
+# files, which collides on macOS's case-insensitive filesystem and
+# intermittently breaks `pod install` in CI. Temporarily switch back to the
+# git source only when validating a freshly-published pod before it
+# propagates to the CDN.
+source 'https://cdn.cocoapods.org/'
+
 # Uncomment this line to define a global platform for your project
-platform :ios, '13.0'
+platform :ios, '15.5'
 
 # CocoaPods analytics sends network stats synchronously affecting flutter build latency.
 ENV['COCOAPODS_DISABLE_STATS'] = 'true'
@@ -35,10 +42,18 @@ target 'Runner' do
   use_modular_headers!
 
   flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+
+  # Local Yttrium development - override CocoaPods version with local build
+  # Comment out to use published version
+  # pod 'YttriumUtilsWrapper', :path => '/path/to/yttrium/local'
 end
 
 post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_ios_build_settings(target)
+    target.build_configurations.each do |config|
+      # mobile_scanner (GoogleMLKit) requires iOS 15.5+; keep every pod aligned.
+      config.build_settings['IPHONEOS_DEPLOYMENT_TARGET'] = '15.5'
+    end
   end
 end

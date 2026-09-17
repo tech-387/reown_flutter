@@ -1,70 +1,55 @@
-import 'dart:async';
-
 import 'package:flutter/material.dart';
 import 'package:get_it/get_it.dart';
-import 'package:qr_bar_code_scanner_dialog/qr_bar_code_scanner_dialog.dart';
 import 'package:reown_walletkit/reown_walletkit.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/i_bottom_sheet_service.dart';
-import 'package:reown_walletkit_wallet/dependencies/deep_link_handler.dart';
 import 'package:reown_walletkit_wallet/dependencies/i_walletkit_service.dart';
 import 'package:reown_walletkit_wallet/pages/app_detail_page.dart';
-import 'package:reown_walletkit_wallet/utils/constants.dart';
+import 'package:reown_walletkit_wallet/theme/app_colors.dart';
+import 'package:reown_walletkit_wallet/theme/app_spacing.dart';
 import 'package:reown_walletkit_wallet/utils/eth_utils.dart';
-import 'package:reown_walletkit_wallet/widgets/pairing_item.dart';
-import 'package:reown_walletkit_wallet/widgets/uri_input_popup.dart';
+import 'package:reown_walletkit_wallet/widgets/session_item.dart';
 import 'package:toastification/toastification.dart';
 
 class AppsPage extends StatefulWidget {
-  AppsPage({
-    super.key,
-    required this.isDarkMode,
-  });
-  final bool isDarkMode;
+  AppsPage({super.key});
 
   @override
   AppsPageState createState() => AppsPageState();
 }
 
-class AppsPageState extends State<AppsPage> with WidgetsBindingObserver {
-  List<PairingInfo> _pairings = [];
-  late IWalletKitService _walletKitService;
-  late IReownWalletKit _walletKit;
+class AppsPageState extends State<AppsPage> {
+  final _walletKitService = GetIt.I<IWalletKitService>();
+
+  List<SessionData> get _sessions =>
+      _walletKitService.walletKit.sessions.getAll();
 
   @override
   void initState() {
     super.initState();
-    _walletKitService = GetIt.I<IWalletKitService>();
-    _walletKit = _walletKitService.walletKit;
-    _pairings = _walletKit.pairings.getAll();
-    _pairings = _pairings.where((p) => p.active).toList();
-    //
     _registerListeners();
   }
 
   void _registerListeners() {
-    _walletKit.core.relayClient.onRelayClientMessage.subscribe(
-      _onRelayClientMessage,
-    );
-    _walletKit.pairings.onSync.subscribe(_refreshState);
-    _walletKit.pairings.onUpdate.subscribe(_refreshState);
-    _walletKit.onSessionConnect.subscribe(_refreshState);
-    _walletKit.onSessionDelete.subscribe(_refreshState);
+    _walletKitService.walletKit.core.relayClient.onRelayClientMessage
+        .subscribe(_onRelayClientMessage);
+    _walletKitService.pairings!.onSync.subscribe(_refreshState);
+    _walletKitService.pairings!.onUpdate.subscribe(_refreshState);
+    _walletKitService.walletKit.onSessionConnect.subscribe(_refreshState);
+    _walletKitService.walletKit.onSessionDelete.subscribe(_refreshState);
   }
 
   void _unregisterListeners() {
-    _walletKit.onSessionDelete.unsubscribe(_refreshState);
-    _walletKit.onSessionConnect.unsubscribe(_refreshState);
-    _walletKit.pairings.onSync.unsubscribe(_refreshState);
-    _walletKit.pairings.onUpdate.unsubscribe(_refreshState);
-    _walletKit.core.relayClient.onRelayClientMessage.unsubscribe(
-      _onRelayClientMessage,
-    );
+    _walletKitService.walletKit.core.relayClient.onRelayClientMessage
+        .unsubscribe(_onRelayClientMessage);
+    _walletKitService.walletKit.onSessionDelete.unsubscribe(_refreshState);
+    _walletKitService.walletKit.onSessionConnect.unsubscribe(_refreshState);
+    _walletKitService.pairings!.onSync.unsubscribe(_refreshState);
+    _walletKitService.pairings!.onUpdate.unsubscribe(_refreshState);
   }
 
   @override
   void dispose() {
     _unregisterListeners();
-    WidgetsBinding.instance.removeObserver(this);
     super.dispose();
   }
 
@@ -91,166 +76,54 @@ class AppsPageState extends State<AppsPage> with WidgetsBindingObserver {
 
   @override
   Widget build(BuildContext context) {
-    _pairings = _walletKit.pairings.getAll();
-    _pairings = _pairings.where((p) => p.active).toList();
-    return Stack(
-      children: [
-        Center(
-          child: Stack(
-            alignment: Alignment.center,
-            children: [
-              Center(
-                child: Image.asset(
-                  'assets/walletkit-logo.png',
-                  width: 200.0,
-                ),
-              ),
-              Container(
-                color: widget.isDarkMode
-                    ? Colors.black.withValues(alpha: 0.8)
-                    : Colors.white.withValues(alpha: 0.8),
-              )
-            ],
-          ),
-        ),
-        if (_pairings.isNotEmpty) _buildPairingList(),
-        Positioned(
-          bottom: StyleConstants.magic20,
-          right: StyleConstants.magic20,
-          left: StyleConstants.magic20,
-          child: Row(
-            children: [
-              const SizedBox(width: StyleConstants.magic20),
-              _buildIconButton(Icons.copy, _onCopyQrCode),
-              const SizedBox(width: StyleConstants.magic20),
-              _buildIconButton(Icons.qr_code_rounded, _onScanQrCode),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
+    final sessions = _sessions;
+    final colors = context.colors;
 
-  Widget _buildPairingList() {
-    final pairingItems = _pairings
-        .map(
-          (PairingInfo pairing) => PairingItem(
-            key: ValueKey(pairing.topic),
-            pairing: pairing,
-            onTap: () => _onListItemTap(pairing),
-          ),
-        )
-        .toList();
+    if (sessions.isEmpty) {
+      return Center(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Text(
+              'No connected apps yet',
+              style: TextStyle(
+                color: colors.textPrimary,
+                fontSize: 20.0,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+            const SizedBox(height: AppSpacing.s2),
+            Text(
+              'Scan a WalletConnect QR code to get started.',
+              style: TextStyle(
+                color: colors.textSecondary,
+                fontSize: 16.0,
+                fontWeight: FontWeight.w400,
+              ),
+            ),
+          ],
+        ),
+      );
+    }
 
     return ListView.builder(
-      itemCount: pairingItems.length,
+      padding: const EdgeInsets.symmetric(vertical: AppSpacing.s2),
+      itemCount: sessions.length,
       itemBuilder: (BuildContext context, int index) {
-        return pairingItems[index];
+        final session = sessions[index];
+        return SessionItem(
+          key: ValueKey(session.topic),
+          session: session,
+          onTap: () => _onSessionTap(session),
+        );
       },
     );
   }
 
-  Widget _buildIconButton(IconData icon, void Function()? onPressed) {
-    return Container(
-      decoration: BoxDecoration(
-        color: Color(0xFF667DFF),
-        borderRadius: BorderRadius.circular(
-          StyleConstants.linear48,
-        ),
-      ),
-      child: IconButton(
-        icon: Icon(
-          icon,
-          color: StyleConstants.titleTextColor,
-        ),
-        iconSize: StyleConstants.linear24,
-        onPressed: onPressed,
-      ),
-    );
-  }
-
-  Future<dynamic> _onCopyQrCode() async {
-    final uri = await GetIt.I<IBottomSheetService>().queueBottomSheet(
-      widget: UriInputPopup(),
-    );
-    if (uri is String) {
-      _onFoundUri(uri);
-    }
-  }
-
-  Future _onScanQrCode() async {
-    try {
-      QrBarCodeScannerDialog().getScannedQrBarCode(
-        context: context,
-        onCode: (value) {
-          if (!mounted) return;
-          _onFoundUri(value);
-        },
-      );
-    } catch (e) {
-      debugPrint(e.toString());
-    }
-  }
-
-  Future<void> _onFoundUri(String? uri) async {
-    if ((uri ?? '').isEmpty) return;
-    try {
-      DeepLinkHandler.waiting.value = true;
-      await _walletKit.pair(uri: Uri.parse(uri!));
-    } on ReownSignError catch (e) {
-      _showErrorDialog('${e.code}: ${e.message}\n$uri');
-    } on TimeoutException catch (_) {
-      _showErrorDialog('Time out error. Check your connection.');
-    }
-  }
-
-  void _showErrorDialog(String message) async {
-    DeepLinkHandler.waiting.value = false;
-    await showDialog(
-        context: context,
-        builder: (BuildContext context) {
-          return AlertDialog(
-            title: const Text(
-              'Error',
-              style: TextStyle(
-                color: Colors.black,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            content: Text(
-              message,
-              style: const TextStyle(
-                color: Colors.black,
-              ),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () {
-                  if (Navigator.canPop(context)) {
-                    Navigator.pop(context);
-                  }
-                },
-                child: const Text(
-                  'Close',
-                  style: TextStyle(
-                    color: Colors.black,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              )
-            ],
-          );
-        });
-  }
-
-  void _onListItemTap(PairingInfo pairing) {
-    Navigator.push(
-      context,
-      MaterialPageRoute(
-        builder: (context) => AppDetailPage(
-          pairing: pairing,
-        ),
-      ),
+  void _onSessionTap(SessionData session) {
+    GetIt.I<IBottomSheetService>().queueBottomSheet(
+      widget: AppDetailPage(session: session),
+      leadingWidget: DisconnectButton(sessionTopic: session.topic),
     );
   }
 }

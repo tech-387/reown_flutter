@@ -1,0 +1,250 @@
+import 'dart:async';
+
+import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
+import 'package:flutter_svg/flutter_svg.dart';
+import 'package:get_it/get_it.dart';
+import 'package:reown_walletkit/reown_walletkit.dart';
+import 'package:reown_walletkit_wallet/dependencies/deep_link_handler.dart';
+import 'package:reown_walletkit_wallet/dependencies/i_walletkit_service.dart';
+import 'package:reown_walletkit_wallet/main.dart' show navigatorKey;
+import 'package:reown_walletkit_wallet/theme/app_colors.dart';
+import 'package:reown_walletkit_wallet/theme/app_radius.dart';
+import 'package:reown_walletkit_wallet/theme/app_spacing.dart';
+import 'package:reown_walletkit_wallet/utils/dart_defines.dart';
+import 'package:reown_walletkit_wallet/widgets/qr_scanner_page.dart';
+
+class ScanModal extends StatefulWidget {
+  const ScanModal({super.key});
+
+  @override
+  State<ScanModal> createState() => _ScanModalState();
+}
+
+class _ScanModalState extends State<ScanModal> {
+  final _urlController = TextEditingController();
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = context.colors;
+
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        const SizedBox(height: AppSpacing.s5),
+        _OptionCard(
+          svgAsset: 'assets/Barcode.svg',
+          title: 'Scan QR code',
+          onTap: () => _onScanQrCode(context),
+          colors: colors,
+        ),
+        const SizedBox(height: AppSpacing.s2),
+        _OptionCard(
+          svgAsset: 'assets/Copy.svg',
+          title: 'Paste a URL',
+          onTap: () => _onPasteUri(context),
+          colors: colors,
+        ),
+        if (DartDefines.enableTestMode) ...[
+          const SizedBox(height: AppSpacing.s2),
+          Semantics(
+            container: true,
+            identifier: 'input-paste-url',
+            label: 'input-paste-url',
+            child: TextField(
+              controller: _urlController,
+              decoration: InputDecoration(
+                hintText: 'Paste URL here',
+                hintStyle: TextStyle(color: colors.textSecondary),
+                filled: true,
+                fillColor: colors.backgroundSecondary,
+                border: OutlineInputBorder(
+                  borderRadius: AppRadius.borderRadiusLg,
+                  borderSide: BorderSide.none,
+                ),
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: AppSpacing.s4,
+                  vertical: AppSpacing.s4,
+                ),
+              ),
+              style: TextStyle(color: colors.textPrimary, fontSize: 16.0),
+              textInputAction: TextInputAction.done,
+            ),
+          ),
+          const SizedBox(height: AppSpacing.s2),
+          Semantics(
+            container: true,
+            identifier: 'button-submit-url',
+            label: 'button-submit-url',
+            child: GestureDetector(
+              onTap: () => _onSubmitUrl(context),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.all(AppSpacing.s4),
+                decoration: BoxDecoration(
+                  color: colors.accent,
+                  borderRadius: AppRadius.borderRadiusLg,
+                ),
+                alignment: Alignment.center,
+                child: Text(
+                  'Submit',
+                  style: TextStyle(
+                    color: colors.onAccent,
+                    fontSize: 16.0,
+                    fontWeight: FontWeight.w500,
+                  ),
+                ),
+              ),
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+
+  void _onSubmitUrl(BuildContext context) {
+    final uri = _urlController.text.trim();
+    if (uri.isEmpty) return;
+    Navigator.of(context).pop();
+    _pairWithUri(uri);
+  }
+
+  Future<void> _onScanQrCode(BuildContext context) async {
+    Navigator.of(context).pop();
+    final rootContext = navigatorKey.currentContext;
+    if (rootContext == null) return;
+    try {
+      final value = await Navigator.of(rootContext).push<String>(
+        MaterialPageRoute(
+          fullscreenDialog: true,
+          builder: (_) => const QrScannerPage(),
+        ),
+      );
+      if (value == null || value.isEmpty) return;
+      // Defer pairing to the next frame so the scanner's teardown never
+      // shares a frame with the request modal's open animation.
+      WidgetsBinding.instance.addPostFrameCallback((_) => _pairWithUri(value));
+    } catch (e) {
+      debugPrint('[ScanModal] scan error: $e');
+    }
+  }
+
+  Future<void> _onPasteUri(BuildContext context) async {
+    Navigator.of(context).pop();
+    try {
+      final clipboardData = await Clipboard.getData(Clipboard.kTextPlain);
+      final uri = clipboardData?.text?.trim();
+      if (uri == null || uri.isEmpty) {
+        _showError('Clipboard is empty');
+        return;
+      }
+      await _pairWithUri(uri);
+    } catch (e) {
+      _showError('Failed to read clipboard');
+    }
+  }
+
+  Future<void> _pairWithUri(String? uri) async {
+    if (uri == null || uri.isEmpty) return;
+    final walletKitService = GetIt.I<IWalletKitService>();
+    try {
+      DeepLinkHandler.waiting.value = true;
+      await walletKitService.pair(uri);
+    } on TimeoutException catch (_) {
+      _showError('Timeout error. Check your connection.');
+    } on ReownSignError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } on PayInitializeError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } on GetPaymentOptionsError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } on GetRequiredActionsError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } on ConfirmPaymentError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } on PayError catch (e) {
+      _showError('${e.code}: ${e.message}');
+    } catch (e) {
+      _showError('Invalid URI or connection error: $e');
+    } finally {
+      DeepLinkHandler.waiting.value = false;
+    }
+  }
+
+  void _showError(String message) {
+    final context = navigatorKey.currentContext;
+    if (context == null) return;
+    final colors = context.colors;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(
+        content: Text(
+          message,
+          style: TextStyle(color: colors.onAccent),
+        ),
+        backgroundColor: colors.error,
+        behavior: SnackBarBehavior.floating,
+        shape: RoundedRectangleBorder(
+          borderRadius: BorderRadius.circular(8.0),
+        ),
+        margin: const EdgeInsets.all(AppSpacing.s4),
+      ),
+    );
+  }
+}
+
+class _OptionCard extends StatelessWidget {
+  const _OptionCard({
+    required this.svgAsset,
+    required this.title,
+    required this.onTap,
+    required this.colors,
+  });
+
+  final String svgAsset;
+  final String title;
+  final VoidCallback onTap;
+  final AppColors colors;
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: Container(
+        padding: const EdgeInsets.all(AppSpacing.s6),
+        decoration: BoxDecoration(
+          color: colors.backgroundSecondary,
+          borderRadius: AppRadius.borderRadiusLg,
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: Text(
+                title,
+                style: TextStyle(
+                  color: colors.textPrimary,
+                  fontSize: 16.0,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
+            SvgPicture.asset(
+              svgAsset,
+              width: 20.0,
+              height: 20.0,
+              colorFilter: ColorFilter.mode(
+                colors.textPrimary,
+                BlendMode.srcIn,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}

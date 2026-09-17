@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:reown_walletkit_wallet/dependencies/bottom_sheet/i_bottom_sheet_service.dart';
-import 'package:reown_walletkit_wallet/utils/constants.dart';
+import 'package:reown_walletkit_wallet/theme/app_spacing.dart';
+import 'package:reown_walletkit_wallet/theme/app_typography.dart';
 import 'package:reown_walletkit_wallet/widgets/custom_button.dart';
 
 class WCSessionAuthRequestWidget extends StatelessWidget {
-  const WCSessionAuthRequestWidget({
-    super.key,
-    required this.child,
-  });
+  const WCSessionAuthRequestWidget({super.key, required this.child});
 
   final Widget child;
 
@@ -16,12 +14,8 @@ class WCSessionAuthRequestWidget extends StatelessWidget {
     return Column(
       mainAxisSize: MainAxisSize.min,
       children: [
-        Expanded(
-          child: SingleChildScrollView(
-            child: child,
-          ),
-        ),
-        const SizedBox(height: StyleConstants.linear16),
+        Expanded(child: SingleChildScrollView(child: child)),
+        const SizedBox(height: AppSpacing.s4),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           children: [
@@ -32,13 +26,13 @@ class WCSessionAuthRequestWidget extends StatelessWidget {
                 }
               },
               type: CustomButtonType.invalid,
-              child: const Text(
+              child: Text(
                 'Cancel',
-                style: StyleConstants.buttonText,
+                style: context.textStyles.buttonText,
                 textAlign: TextAlign.center,
               ),
             ),
-            const SizedBox(width: StyleConstants.linear8),
+            const SizedBox(width: AppSpacing.s2),
             CustomButton(
               onTap: () {
                 if (Navigator.canPop(context)) {
@@ -46,13 +40,13 @@ class WCSessionAuthRequestWidget extends StatelessWidget {
                 }
               },
               type: CustomButtonType.normal,
-              child: const Text(
+              child: Text(
                 'Sign One',
-                style: StyleConstants.buttonText,
+                style: context.textStyles.buttonText,
                 textAlign: TextAlign.center,
               ),
             ),
-            const SizedBox(width: StyleConstants.linear8),
+            const SizedBox(width: AppSpacing.s2),
             CustomButton(
               onTap: () {
                 if (Navigator.canPop(context)) {
@@ -60,9 +54,9 @@ class WCSessionAuthRequestWidget extends StatelessWidget {
                 }
               },
               type: CustomButtonType.valid,
-              child: const Text(
+              child: Text(
                 'Sign All',
-                style: StyleConstants.buttonText,
+                style: context.textStyles.buttonText,
                 textAlign: TextAlign.center,
               ),
             ),

@@ -1,0 +1,62 @@
+name: Release AppKit
+
+run-name: "AppKit - ${{ inputs.platform == 'both' && '🍎+🤖 Both' || (inputs.platform == 'ios' && '🍎 iOS' || '🤖 Android') }} (${{ inputs.release-type }})"
+
+on:
+  workflow_dispatch:
+    inputs:
+      platform:
+        description: 'Platform to build'
+        required: true
+        type: choice
+        options:
+          - both
+          - android
+          - ios
+      release-type:
+        description: 'Release type'
+        required: true
+        type: choice
+        options:
+          - internal
+          - production
+      release-notes:
+        description: 'Custom release notes (optional, defaults to branch name)'
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  android:
+    if: inputs.platform == 'android' || inputs.platform == 'both'
+    uses: ./.github/workflows/release-android-base.yml
+    with:
+      app-name: 'AppKit Flutter'
+      working-directory: 'packages/reown_appkit/example/base'
+      flavor: ${{ inputs.release-type }}
+      firebase-app-id: ${{ inputs.release-type == 'internal' && vars.FIREBASE_DAPP_ID_INTERNAL || vars.FIREBASE_DAPP_ID }}
+      firebase-url: ${{ inputs.release-type == 'internal' && vars.FIREBASE_URL_DAPP_INTERNAL || vars.FIREBASE_URL_DAPP }}
+      project-id-secret: 'DAPP_PROJECT_ID'
+      sentry-dsn-secret: ${{ inputs.release-type == 'internal' && 'DAPP_SENTRY_DSN' || 'DAPP_SENTRY_DSN_PROD' }}
+      sentry-env-var: 'DAPP_SENTRY_DSN'
+      release-notes: ${{ inputs.release-notes }}
+    secrets: inherit
+
+  ios:
+    if: inputs.platform == 'ios' || inputs.platform == 'both'
+    uses: ./.github/workflows/release-ios-base.yml
+    with:
+      app-name: 'AppKit Flutter'
+      working-directory: 'packages/reown_appkit/example/base'
+      flavor: ${{ inputs.release-type }}
+      bundle-id: ${{ inputs.release-type == 'internal' && 'com.walletconnect.flutterdapp.internal' || 'com.walletconnect.flutterdapp' }}
+      apple-app-id-secret: ${{ inputs.release-type == 'internal' && 'APPLE_DAPP_ID_INTERNAL' || 'APPLE_DAPP_ID' }}
+      testflight-url: ${{ inputs.release-type == 'internal' && vars.TESTFLIGHT_URL_DAPP_INTERNAL || vars.TESTFLIGHT_URL_DAPP }}
+      project-id-secret: 'DAPP_PROJECT_ID'
+      sentry-dsn-secret: ${{ inputs.release-type == 'internal' && 'DAPP_SENTRY_DSN' || 'DAPP_SENTRY_DSN_PROD' }}
+      sentry-env-var: 'DAPP_SENTRY_DSN'
+      app-description: 'AppKit sample app'
+      release-notes: ${{ inputs.release-notes }}
+    secrets: inherit

@@ -51,9 +51,7 @@ class SUIService {
   }
 
   Future<String> generateKeyPair({required String networkId}) async {
-    return await _suiClient.generateKeyPair(
-      networkId: networkId,
-    );
+    return await _suiClient.generateKeyPair(networkId: networkId);
   }
 
   Future<String> getAddressFromPublicKey({
@@ -79,16 +77,14 @@ class SUIService {
   Future<void> suiSignPersonalMessage(String topic, dynamic parameters) async {
     debugPrint('[SampleWallet] suiSignPersonalMessage: $parameters');
     final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
     try {
       final params = parameters as Map<String, dynamic>;
       final address = params['address'].toString();
       final message = params['message'].toString();
 
+      final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
       if (await MethodsUtils.requestApproval(
         message,
         method: pRequest.method,
@@ -96,30 +92,21 @@ class SUIService {
         address: address,
         transportType: pRequest.transportType.name,
         verifyContext: pRequest.verifyContext,
+        requester: requester,
       )) {
         final signature = await signMessage(message);
-        response = response.copyWith(
-          result: {
-            'signature': signature,
-          },
-        );
+        response = response.copyWith(result: {'signature': signature});
       } else {
         final error = Errors.getSdkError(Errors.USER_REJECTED);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } catch (e) {
       debugPrint('[SampleWallet] suiSignPersonalMessage error $e');
       final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -127,9 +114,7 @@ class SUIService {
   }
 
   Future<String> signMessage(String message) async {
-    final keys = GetIt.I<IKeyService>().getKeysForChain(
-      chainSupported.chainId,
-    );
+    final keys = GetIt.I<IKeyService>().getKeysForChain(chainSupported.chainId);
     final suiPrivateKey = keys[0].privateKey;
 
     final signature = await _suiClient.personalSign(
@@ -143,10 +128,7 @@ class SUIService {
   Future<void> suiSignTransaction(String topic, dynamic parameters) async {
     debugPrint('[SampleWallet] suiSignTransaction: ${jsonEncode(parameters)}');
     final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
-    );
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
     final params = parameters as Map<String, dynamic>;
     final address = params['address'] as String;
@@ -156,6 +138,7 @@ class SUIService {
     //   "address": "0xd5f647edb77d4fda31d0304506447fb3c92e55aaf77bc5ed4b77c332dd4605fa"
     // }
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       transaction,
       method: pRequest.method,
@@ -163,6 +146,7 @@ class SUIService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final keys = GetIt.I<IKeyService>().getKeysForChain(
@@ -177,37 +161,25 @@ class SUIService {
         );
 
         response = response.copyWith(
-          result: {
-            'signature': result.$1,
-            'transactionBytes': result.$2,
-          },
+          result: {'signature': result.$1, 'transactionBytes': result.$2},
         );
       } on PlatformException catch (e) {
         debugPrint('[SampleWallet] suiSignTransaction error $e');
         response = response.copyWith(
-          error: JsonRpcError(
-            code: -1,
-            message: '${e.code}: ${e.message}',
-          ),
+          error: JsonRpcError(code: -1, message: '${e.code}: ${e.message}'),
         );
       } catch (e) {
         debugPrint('[SampleWallet] suiSignTransaction error $e');
         // print(e);
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -219,12 +191,10 @@ class SUIService {
     dynamic parameters,
   ) async {
     debugPrint(
-        '[SampleWallet] suiSignAndExecuteTransaction: ${jsonEncode(parameters)}');
-    final pRequest = _walletKit.pendingRequests.getAll().last;
-    var response = JsonRpcResponse(
-      id: pRequest.id,
-      jsonrpc: '2.0',
+      '[SampleWallet] suiSignAndExecuteTransaction: ${jsonEncode(parameters)}',
     );
+    final pRequest = _walletKit.pendingRequests.getAll().last;
+    var response = JsonRpcResponse(id: pRequest.id, jsonrpc: '2.0');
 
     final params = parameters as Map<String, dynamic>;
     final address = params['address'] as String;
@@ -234,6 +204,7 @@ class SUIService {
     //   "address": "0xd5f647edb77d4fda31d0304506447fb3c92e55aaf77bc5ed4b77c332dd4605fa"
     // }
 
+    final requester = _walletKit.sessions.get(pRequest.topic)?.peer;
     if (await MethodsUtils.requestApproval(
       transaction,
       method: pRequest.method,
@@ -241,6 +212,7 @@ class SUIService {
       address: address,
       transportType: pRequest.transportType.name,
       verifyContext: pRequest.verifyContext,
+      requester: requester,
     )) {
       try {
         final keys = GetIt.I<IKeyService>().getKeysForChain(
@@ -254,36 +226,23 @@ class SUIService {
           txData: transaction,
         );
 
-        response = response.copyWith(
-          result: {
-            'digest': digest,
-          },
-        );
+        response = response.copyWith(result: {'digest': digest});
       } on PlatformException catch (e) {
         debugPrint('[SampleWallet] suiSignAndExecuteTransaction error $e');
         response = response.copyWith(
-          error: JsonRpcError(
-            code: -1,
-            message: '${e.code}: ${e.message}',
-          ),
+          error: JsonRpcError(code: -1, message: '${e.code}: ${e.message}'),
         );
       } catch (e) {
         debugPrint('[SampleWallet] suiSignAndExecuteTransaction error $e');
         final error = Errors.getSdkError(Errors.MALFORMED_REQUEST_PARAMS);
         response = response.copyWith(
-          error: JsonRpcError(
-            code: error.code,
-            message: error.message,
-          ),
+          error: JsonRpcError(code: error.code, message: error.message),
         );
       }
     } else {
       final error = Errors.getSdkError(Errors.USER_REJECTED);
       response = response.copyWith(
-        error: JsonRpcError(
-          code: error.code,
-          message: error.message,
-        ),
+        error: JsonRpcError(code: error.code, message: error.message),
       );
     }
 
@@ -294,10 +253,7 @@ class SUIService {
     final session = _walletKit.sessions.get(topic);
 
     try {
-      await _walletKit.respondSessionRequest(
-        topic: topic,
-        response: response,
-      );
+      await _walletKit.respondSessionRequest(topic: topic, response: response);
       MethodsUtils.handleRedirect(
         topic,
         session!.peer.metadata.redirect,

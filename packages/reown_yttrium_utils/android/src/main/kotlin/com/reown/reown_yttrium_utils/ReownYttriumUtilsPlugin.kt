@@ -38,6 +38,12 @@ class ReownYttriumUtilsPlugin: FlutterPlugin, MethodCallHandler {
       // "stx_estimateFees" -> Stacks.estimateFees(call.arguments, result)
       // "stx_getNonce" -> Stacks.getNonce(call.arguments, result)
       "stx_dispose" -> Stacks.dispose(call.arguments, result)
+      // === SOLANA METHODS ===
+      "solana_generateKeyPair" -> Solana.generateKeyPair(result)
+      "solana_getPublicKey" -> Solana.getPublicKey(call.arguments, result)
+      "solana_signTransaction" -> Solana.signTransaction(call.arguments, result)
+      "solana_signAllTransactions" -> Solana.signAllTransactions(call.arguments, result)
+      "solana_signMessage" -> Solana.signMessage(call.arguments, result)
       // === SUI METHODS ===
       "sui_init" -> Sui.init(applicationContext, call.arguments, result)
       "sui_generateKeyPair" -> Sui.generateKeyPair(call.arguments, result)
@@ -53,6 +59,7 @@ class ReownYttriumUtilsPlugin: FlutterPlugin, MethodCallHandler {
       "ton_generateKeypairFromTonMnemonic" -> Ton.generateKeypairFromTonMnemonic(call.arguments, result)
       "ton_generateKeypairFromBip39Mnemonic" -> Ton.generateKeypairFromBip39Mnemonic(call.arguments, result)
       "ton_getAddressFromKeypair" -> Ton.getAddressFromKeypair(call.arguments, result)
+      "ton_getSessionProperties" -> Ton.getSessionProperties(call.arguments, result)
       "ton_signData" -> Ton.signData(call.arguments, result)
       "ton_sendMessage" -> Ton.sendMessage(call.arguments, result)
       "ton_broadcastMessage" -> Ton.broadcastMessage(call.arguments, result)

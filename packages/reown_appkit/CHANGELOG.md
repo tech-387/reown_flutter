@@ -1,4 +1,32 @@
-## 1.7.7-beta02
+## 1.9.0
+
+- Stellar TVF support via reown_core 1.5.0 and reown_sign 1.4.0.
+
+## 1.8.4
+
+- Fixed wallet install detection
+- Fixed modal close guard
+- Updated `reown_core` to 1.4.0 — `flutter_secure_storage` v10 (existing data
+  auto-migrates; raises the minimum Android SDK to 23)
+
+## 1.8.3
+
+- Enabled Coinbase exchange in Deposit With Exchange flow
+
+## 1.8.2
+
+- Improved deposit-exchange flow
+
+## 1.8.1
+
+- Added transaction hash support to deposit-exchange status results
+- Fixed recipient address priority in exchange flow
+
+## 1.8.0
+
+- Deposit From Exchange enhancement: Swapping/Bridging tokens if needed
+
+## 1.7.7
 
 - Enabled Wallet Features for all wallets (EVM and Solana). You can now send and receive directly from AppKit
 - Bug fixes and improvements
@@ -9,7 +37,7 @@
 
 ## 1.7.5
 
-- Bug fix on Deposit With Exchange
+- Bug fix on Deposit From Exchange
 
 ## 1.7.4
 
@@ -17,7 +45,7 @@
 
 ## 1.7.3
 
-- New onDepositSuccess event for `Deposit with Exchange` feature
+- New onDepositSuccess event for `Deposit From Exchange` feature
 
 ## 1.7.2
 

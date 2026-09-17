@@ -1,8 +1,10 @@
 import 'dart:convert';
 
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 
 import 'package:reown_appkit/reown_appkit.dart';
+import 'package:reown_appkit_dapp/pages/pay_webview_page.dart';
 import 'package:reown_appkit_dapp/utils/constants.dart';
 import 'package:reown_appkit_dapp/utils/crypto/helpers.dart';
 import 'package:reown_appkit_dapp/utils/crypto/tron.dart';
@@ -67,6 +69,63 @@ class ConnectPageState extends State<ConnectPage> {
     return;
   }
 
+  // Reads a Pay gateway URL from the clipboard, appends the WebView params
+  // (returnUrl + preferUniversalLinks) and opens the checkout in a WebView.
+  // Mirrors the React Native sample's `PasteUrlButton`.
+  Future<void> _onPastePaymentUrl() async {
+    final String raw;
+    try {
+      final data = await Clipboard.getData(Clipboard.kTextPlain);
+      raw = data?.text?.trim() ?? '';
+    } catch (_) {
+      _showPayError(
+        "Couldn't read clipboard",
+        'Check app permissions, then try again.',
+      );
+      return;
+    }
+    if (raw.isEmpty) {
+      _showPayError(
+        'No URL in clipboard',
+        'Copy a payment URL, then try again.',
+      );
+      return;
+    }
+
+    final parsed = Uri.tryParse(raw);
+    if (parsed == null || parsed.scheme != 'https') {
+      _showPayError(
+        'Invalid payment URL',
+        'Copy a valid https:// payment URL, then try again.',
+      );
+      return;
+    }
+
+    // Return destination the checkout hands to wallets so the OS routes the
+    // user back after signing. Use the app's configured native redirect.
+    final returnUrl =
+        widget.appKitModal.appKit!.metadata.redirect?.native ??
+        'wcflutterdapp://';
+    final payUrl = buildPayUrl(raw, returnUrl);
+
+    if (!mounted) return;
+    Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => PayWebViewPage(url: payUrl)),
+    );
+  }
+
+  void _showPayError(String title, String description) {
+    if (!mounted) return;
+    toastification.show(
+      type: ToastificationType.error,
+      title: Text(title),
+      description: Text(description),
+      context: context,
+      autoCloseDuration: const Duration(seconds: 3),
+      alignment: Alignment.bottomCenter,
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
     // Build the list of chain buttons, clear if the textnet changed
@@ -81,9 +140,6 @@ class ConnectPageState extends State<ConnectPage> {
             child: Stack(
               alignment: Alignment.center,
               children: [
-                // Center(
-                //   child: Image.asset('assets/appkit-logo.png', width: 200.0),
-                // ),
                 Container(
                   color: isDarkMode
                       ? Colors.black.withValues(alpha: 0.8)
@@ -115,18 +171,28 @@ class ConnectPageState extends State<ConnectPage> {
                   ),
                 ],
               ),
-              Row(
-                mainAxisAlignment: MainAxisAlignment.center,
-                children: [
-                  PrimaryButton(
-                    buttonSize: BaseButtonSize.regular,
-                    onTap: _openDepositScreen,
-                    title: 'Deposit with Exchange',
-                  ),
-                ],
-              ),
-              Divider(color: themeColors.grayGlass010),
+              // Row(
+              //   mainAxisAlignment: MainAxisAlignment.center,
+              //   children: [
+              //     PrimaryButton(
+              //       buttonSize: BaseButtonSize.regular,
+              //       onTap: _openDepositScreen,
+              //       title: 'Deposit with Exchange',
+              //     ),
+              //   ],
+              // ),
+              // Divider(color: themeColors.grayGlass010),
               const SizedBox(height: StyleConstants.linear8),
+              Visibility(
+                visible: !widget.appKitModal.isConnected,
+                // The enclosing ListView already applies horizontal padding, so
+                // the button is placed directly (no extra Padding) to stay
+                // aligned with the rest of the content.
+                child: ElevatedButton(
+                  onPressed: _onPastePaymentUrl,
+                  child: const Text('Paste payment URL'),
+                ),
+              ),
               Visibility(
                 visible: widget.appKitModal.isConnected,
                 child: Column(
@@ -148,13 +214,16 @@ class ConnectPageState extends State<ConnectPage> {
                       ],
                     ),
                     const SizedBox.square(dimension: 8.0),
+                    Divider(color: themeColors.grayGlass010),
                     Text(
                       'Connected with ${widget.appKitModal.session?.connectedWalletName ?? 'Unknown wallet'}',
                     ),
                     const SizedBox.square(dimension: 8.0),
                     _RequestButtons(appKitModal: widget.appKitModal),
                     const SizedBox.square(dimension: 8.0),
+                    Divider(color: themeColors.grayGlass010),
                     _SmartAccountButtons(appKitModal: widget.appKitModal),
+                    Divider(color: themeColors.grayGlass010),
                     const SizedBox.square(dimension: 8.0),
                     Text(
                       const JsonEncoder.withIndent(
@@ -172,8 +241,53 @@ class ConnectPageState extends State<ConnectPage> {
     );
   }
 
-  void _openDepositScreen() {
-    widget.appKitModal.openModalView(ReownAppKitModalDepositScreen());
+  // ignore: unused_element
+  void _openDepositScreen() async {
+    try {
+      // /// FILTER YOUR SUPPORTED ASSETS IF NEEDED
+      // /// No needed if you acually call `selectChain()` in the previous step unless you want to filter out native tokens
+      // // This call is only necessary if you want to support assets on a given chain or don't support native tokens
+      // // ignore: unused_local_variable
+      // final filteredAssets = widget.appKitModal.getPaymentAssetsForNetwork(
+      //   // chainId: widget.appKitModal.selectedChain?.chainId,
+      //   includeNative: true,
+      //   includeTest: true,
+      // );
+
+      // // CONFIGURE THE FEATURE BEFORE USING IT
+      // widget.appKitModal.configDeposit(
+      //   /// pass a list of supported assets. If not passed, `allExchangeAssets` are supported
+      //   supportedAssets: filteredAssets,
+
+      //   /// disables asset selection button and fixes the feature to the given asset
+      //   // preselectedAsset: solanaUSDC,
+
+      //   /// shows or hide network icon from asset option. If `false` then `filterByNetwork` will be set to `true` internally
+      //   // showNetworkIcon: false,
+
+      //   /// filter `supportedAssets` by the selected network (if any) or by the first asset network
+      //   filterByNetwork: false,
+
+      //   /// wether to hide or show the deposit asset selection button. Works only if `preselectedAsset` is configured
+      //   // depositAssetButton: false,
+
+      //   /// configured recipients by namespace.
+      //   /// Will override connected wallet address if any
+      //   /// Only use if you want deposit on a different address than the connected wallet
+      //   // configuredRecipients: {
+      //   //   'eip155': '0xD6d146ec0FA91C790737cFB4EE3D7e965a51c340',
+      //   //   'solana': '3ZFT4Cwvy17qzEvjvjyVhgQDYrkzfaXHe8wrpFX8Z5tL',
+      //   // },
+      // );
+
+      // OPEN MODAL
+      await widget.appKitModal.openDepositView();
+      if (widget.appKitModal.session == null) {
+        await widget.appKitModal.selectChain(null);
+      }
+    } catch (e) {
+      debugPrint('❌ Internal Error: $e');
+    }
   }
 
   void _onSessionConnect(SessionConnect? event) async {
@@ -188,6 +302,20 @@ class ConnectPageState extends State<ConnectPage> {
   }
 
   void _onModalConnect(ModalConnect? event) async {
+    final session = event!.session;
+    if (session.connectedWalletName == 'Metamask') {
+      final approvedEvmChains = session.getApprovedChains(namespace: 'eip155');
+      if (approvedEvmChains != null) {
+        final chainId = approvedEvmChains.first;
+        final namespace = NamespaceUtils.getNamespaceFromChain(chainId);
+        final chainInfo = ReownAppKitModalNetworks.getNetworkInfo(
+          namespace,
+          chainId,
+        );
+        await widget.appKitModal.selectChain(chainInfo);
+      }
+    }
+
     setState(() {});
   }
 
