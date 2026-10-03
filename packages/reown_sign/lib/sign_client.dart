@@ -255,6 +255,7 @@ class ReownSignClient implements IReownSignClient {
   @override
   Future<dynamic> request({
     int? requestId,
+    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
@@ -262,6 +263,7 @@ class ReownSignClient implements IReownSignClient {
     try {
       return await engine.request(
         requestId: requestId,
+        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,

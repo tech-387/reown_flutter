@@ -202,6 +202,7 @@ class ReownAppKit implements IReownAppKit {
   @override
   Future<dynamic> request({
     int? requestId,
+    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
@@ -209,6 +210,7 @@ class ReownAppKit implements IReownAppKit {
     try {
       return await reOwnSign.request(
         requestId: requestId,
+        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,

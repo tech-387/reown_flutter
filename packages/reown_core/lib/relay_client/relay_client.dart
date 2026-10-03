@@ -173,6 +173,11 @@ class RelayClient
     } on RequestPublicationCancelled {
       rethrow;
     } catch (e, s) {
+      if (e is TimeoutException &&
+          publication != null &&
+          !publication.hasStarted) {
+        rethrow;
+      }
       core.logger.e('[$runtimeType], publish: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
       return false;

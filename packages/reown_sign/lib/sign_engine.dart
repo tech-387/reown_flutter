@@ -600,10 +600,12 @@ class ReownSign implements IReownSign {
   @override
   Future<dynamic> request({
     int? requestId,
+    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
   }) async {
+    publication?.throwIfCancelled();
     _checkInitialized();
     await _isValidRequest(topic, chainId, request);
 
@@ -618,15 +620,26 @@ class ReownSign implements IReownSign {
       request: request,
     );
 
+    publication?.throwIfCancelled();
+    final expiry = publication?.expiryTimestamp;
+    final params = sessionRequest.toJson();
+    if (expiry != null) {
+      params['request'] = {...request.toJson(), 'expiryTimestamp': expiry};
+    }
+
     final id = requestId ?? JsonRpcUtils.payloadId();
     final tvf = collectRequestTVF(id, sessionRequest);
     core.logger.d('[$runtimeType] _collect Request TVF, id: $id, $tvf');
 
     return await core.pairing.sendRequest(
       id: id,
+      publication: publication,
       topic,
       MethodConstants.WC_SESSION_REQUEST,
-      sessionRequest.toJson(),
+      params,
+      ttl: expiry == null
+          ? null
+          : expiry - DateTime.now().millisecondsSinceEpoch ~/ 1000,
       appLink: _getAppLinkIfEnabled(session?.peer.metadata),
       tvf: tvf,
     );

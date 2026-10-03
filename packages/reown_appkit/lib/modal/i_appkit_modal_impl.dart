@@ -164,8 +164,15 @@ abstract class IReownAppKitModal with ChangeNotifier {
     String? method,
   });
 
-  /// Make a request
+  /// Make a request. For WalletConnect relay requests, [publication] controls
+  /// cancellation before sending and optional expiry. Controlled requests launch
+  /// the wallet only after relay acknowledgement, while still current.
+  /// Use a fresh controller and [requestId] for each operation (or omit the ID).
+  /// Cancellation after sending cannot undo wallet or blockchain operations;
+  /// the returned future continues to represent the original request.
   Future<dynamic> request({
+    int? requestId,
+    RequestPublicationController? publication,
     required String? topic,
     required String chainId,
     String? switchToChainId,

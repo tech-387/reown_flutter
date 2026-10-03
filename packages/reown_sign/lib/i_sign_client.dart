@@ -82,6 +82,8 @@ abstract class IReownSignClient {
     required SessionEventParams event,
   });
   Future<dynamic> request({
+    int? requestId,
+    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,

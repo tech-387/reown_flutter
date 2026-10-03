@@ -478,6 +478,7 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
   @override
   _i21.Future<dynamic> request({
     int? requestId,
+    _i4.RequestPublicationController? publication,
     required String? topic,
     required String? chainId,
     required _i2.SessionRequestParams? request,
@@ -485,6 +486,7 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
       (super.noSuchMethod(
             Invocation.method(#request, [], {
               #requestId: requestId,
+              #publication: publication,
               #topic: topic,
               #chainId: chainId,
               #request: request,

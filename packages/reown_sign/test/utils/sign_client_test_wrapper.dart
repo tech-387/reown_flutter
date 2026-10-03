@@ -200,12 +200,15 @@ class SignClientTestWrapper implements IReownSign {
   @override
   Future<dynamic> request({
     int? requestId,
+    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
   }) async {
     try {
       return await client.request(
+        requestId: requestId,
+        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,
