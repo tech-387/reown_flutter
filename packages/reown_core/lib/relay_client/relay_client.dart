@@ -274,7 +274,7 @@ class RelayClient
         id: JsonRpcUtils.payloadId(entropy: 6),
         method: _buildIRNMethod(IRN_UNSUBSCRIBE),
         parameters: {'topic': topic, 'id': id},
-      );
+      ).timeout(const Duration(seconds: 5));
     } catch (e, s) {
       core.logger.e('[$runtimeType], unsubscribe: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
@@ -299,8 +299,6 @@ class RelayClient
 
   @override
   Future<void> disconnect() async {
-    _checkInitialized();
-
     core.logger.i('[$runtimeType]: Disconnecting from relay');
 
     await _disconnect();
@@ -309,36 +307,39 @@ class RelayClient
   /// PRIVATE FUNCTIONS ///
 
   Future<void> _connect({String? relayUrl}) async {
+    if (_connecting) return await _connectingFuture;
+    if (isConnected) return;
+
+    // Reserve the shared attempt before cleanup or connection can yield.
+    _connecting = true;
+    _connectingFuture = _connectRelay(relayUrl: relayUrl);
+    await _connectingFuture;
+  }
+
+  Future<void> _connectRelay({String? relayUrl}) async {
     core.logger.d(
       '[$runtimeType]: _connect $relayUrl, isConnected: $isConnected',
     );
-    if (isConnected) {
-      return;
-    }
 
     core.relayUrl = relayUrl ?? core.relayUrl;
     core.logger.i('[$runtimeType] Connecting to relay url ${core.relayUrl}');
 
-    // If we have tried connecting to the relay before, disconnect
-    if (_active) {
-      await _disconnect();
-    }
-
     try {
-      // Connect and track the connection progress, then start the heartbeat
-      _connectingFuture = _createJsonRPCProvider();
-      await _connectingFuture;
-      _connecting = false;
+      // If we have tried connecting to the relay before, disconnect
+      if (_active) {
+        await _disconnect();
+      }
+
+      // Connect, then start the heartbeat.
+      await _createJsonRPCProvider();
       _subscribeToHeartbeat();
-      //
     } on TimeoutException catch (e, s) {
       core.logger.e('[$runtimeType], _connect timeout: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent('Connection to relay timeout'));
-      _connecting = false;
-      _connect();
     } catch (e, s) {
       core.logger.e('[$runtimeType], _connect error: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
+    } finally {
       _connecting = false;
     }
   }
@@ -360,7 +361,6 @@ class RelayClient
   }
 
   Future<void> _createJsonRPCProvider() async {
-    _connecting = true;
     _active = true;
     final signedJWT = await core.crypto.signJWT(core.relayUrl);
     core.logger.d('[$runtimeType]: Signed JWT: $signedJWT');
@@ -403,8 +403,11 @@ class RelayClient
 
     // When jsonRPC closes, emit the event
     _handledClose = false;
-    jsonRPC!.done.then((value) {
-      _handleRelayClose(socketHandler.closeCode, socketHandler.closeReason);
+    final peer = jsonRPC!;
+    peer.done.then((value) {
+      if (identical(jsonRPC, peer)) {
+        _handleRelayClose(socketHandler.closeCode, socketHandler.closeReason);
+      }
     });
 
     onRelayClientConnect.broadcast();

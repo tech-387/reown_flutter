@@ -26,6 +26,11 @@ abstract class IReownSignCommon {
   abstract final IGenericStore<String> pairingTopics;
 
   Future<void> init();
+
+  /// Revokes local session use even when peer notification fails or is offline.
+  /// Completion does not imply peer acknowledgement. Existing response waiters
+  /// retain their keys/subscriptions until settlement; local cleanup errors throw.
+  /// Failed cleanup remains revoked and can be retried with the same topic.
   Future<void> disconnectSession({
     required String topic,
     required ReownSignError reason,

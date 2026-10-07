@@ -6,6 +6,7 @@ import 'package:convert/convert.dart';
 import 'package:event/event.dart';
 import 'package:flutter/foundation.dart';
 import 'package:reown_core/models/tvf_data.dart';
+import 'package:reown_core/pairing/pairing.dart';
 import 'package:reown_core/pairing/utils/json_rpc_utils.dart';
 import 'package:reown_core/reown_core.dart';
 import 'package:reown_core/store/generic_store.dart';
@@ -211,7 +212,7 @@ class ReownSign implements IReownSign {
       uri = newTopicAndUri.uri;
       // print('connect generated topic: $topic');
     } else {
-      core.pairing.isValidPairingTopic(topic: pTopic);
+      await core.pairing.isValidPairingTopic(topic: pTopic);
     }
 
     final publicKey = await core.crypto.generateKeyPair();
@@ -261,6 +262,8 @@ class ReownSign implements IReownSign {
     }
 
     Completer<SessionData> completer = Completer();
+    // Retirement can reject this private future before connect returns it.
+    completer.future.ignore();
     final pending = SessionProposalCompleter(
       id: id,
       selfPublicKey: publicKey,
@@ -273,9 +276,20 @@ class ReownSign implements IReownSign {
     // Reserve the identity before persistence yields to another connect call.
     pendingProposals.add(pending);
     try {
+      // Reserve cleanup ownership before checking a pairing that may have been
+      // disconnected while key generation was pending.
+      await core.pairing.isValidPairingTopic(topic: pTopic);
       await _setProposal(id, proposal);
-    } catch (_) {
-      pendingProposals.remove(pending);
+    } catch (error, stackTrace) {
+      core.logger.e(
+        '[$runtimeType] proposal allocation failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+      if (!pending.completer.isCompleted) {
+        pending.completer.completeError(error);
+      }
+      await _deleteProposalResources(pending);
       rethrow;
     }
     _connectResponseHandler(pTopic, request, id, publication: publication);
@@ -305,19 +319,22 @@ class ReownSign implements IReownSign {
           message: 'Proposal request $requestId has no pending owner.',
         );
       }
+      if (owned.completer.isCompleted) return;
       final response = await core.pairing.sendProposeSessionRequest(
         topic,
         request.toJson(),
         id: requestId,
         publication: publication,
       );
+      if (!pendingProposals.contains(owned) || owned.completer.isCompleted) {
+        return;
+      }
       final String peerPublicKey = response['responderPublicKey'];
 
       final String sessionTopic = await core.crypto.generateSharedKey(
         owned.selfPublicKey,
         peerPublicKey,
       );
-      if (!pendingProposals.contains(owned)) return;
       final existing = _proposalBySessionTopic[sessionTopic];
       if (existing != null && !identical(existing, owned)) {
         throw ReownSignError(
@@ -327,6 +344,11 @@ class ReownSign implements IReownSign {
       }
       // A subscription can deliver settlement before subscribe() completes.
       _proposalBySessionTopic[sessionTopic] = owned;
+      // Index before checking cancellation so finally can remove a late key.
+      if (owned.completer.isCompleted) return;
+      if (_isSessionTopicRetired(sessionTopic)) {
+        throw Errors.getSdkError(Errors.USER_DISCONNECTED).toSignError();
+      }
 
       // Delete the proposal, we are done with it
       await _deleteProposal(requestId);
@@ -336,14 +358,34 @@ class ReownSign implements IReownSign {
           options: SubscribeOptions(topic: sessionTopic),
         );
       } catch (error, stackTrace) {
-        if (publication == null) rethrow;
-        // Subscription may already be active when its persistence fails.
-        // Keep this exact owner available for a later wallet settlement.
+        if (pendingProposals.contains(owned) && !owned.completer.isCompleted) {
+          if (publication == null) rethrow;
+          // Subscription may already be active when its persistence fails.
+          // Keep this exact owner available for a later wallet settlement.
+          core.logger.e(
+            '[$runtimeType] subscription uncertain; retaining proposal $requestId',
+            error: error,
+            stackTrace: stackTrace,
+          );
+          return;
+        }
+        // A failed late subscription still needs retirement cleanup below.
         core.logger.e(
-          '[$runtimeType] subscription uncertain; retaining proposal $requestId',
+          '[$runtimeType] retired proposal subscription failed',
           error: error,
           stackTrace: stackTrace,
         );
+      }
+      if (!pendingProposals.contains(owned) || owned.completer.isCompleted) {
+        // Disconnect may have retired this proposal while subscribe was in
+        // flight. An early successful settlement also removes the proposal;
+        // its session (possibly awaiting a late response) still owns the key.
+        if (!pendingProposals.contains(owned) &&
+            !sessions.has(sessionTopic) &&
+            !_pendingSessionDeletions.has(sessionTopic)) {
+          await core.relayClient.unsubscribe(topic: sessionTopic);
+          await core.crypto.deleteSymKey(sessionTopic);
+        }
         return;
       }
       final pairing = core.pairing.getPairing(topic: topic);
@@ -353,16 +395,24 @@ class ReownSign implements IReownSign {
         await core.pairing.activate(topic: topic);
       }
     } catch (e, s) {
-      // Get the completer and finish it with an error
-      if (owned != null) {
-        _proposalBySessionTopic.removeWhere(
-          (_, value) => identical(value, owned),
-        );
-        if (pendingProposals.remove(owned) && !owned.completer.isCompleted) {
-          owned.completer.completeError(e);
-        }
+      if (owned != null && !owned.completer.isCompleted) {
+        owned.completer.completeError(e);
       }
       core.logger.e('[$runtimeType] connect error: $e, $s');
+    } finally {
+      // Cancellation can remove the owner while a key/subscription is pending.
+      // Keep this local reference to clean any allocation that finished later.
+      if (owned != null && owned.completer.isCompleted) {
+        try {
+          await _deleteProposalResources(owned);
+        } catch (error, stackTrace) {
+          core.logger.e(
+            '[$runtimeType] late proposal cleanup failed',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
     }
   }
 
@@ -758,33 +808,28 @@ class ReownSign implements IReownSign {
     required ReownSignError reason,
   }) async {
     _checkInitialized();
-    _confirmOnlineStateOrThrow();
 
+    if (_pendingSessionDeletions.has(topic)) {
+      // A prior storage failure must leave local retirement retryable even
+      // after the active session record was removed.
+      await _deleteSession(topic);
+      return;
+    }
     try {
       await _isValidDisconnect(topic);
-
-      if (sessions.has(topic)) {
-        final deleteRequest = WcSessionDeleteRequest(
-          code: reason.code,
-          message: reason.message,
-          data: reason.data,
-        );
-        await core.pairing.publishRequestAcknowledged(
-          topic,
-          MethodConstants.WC_SESSION_DELETE,
-          deleteRequest.toJson(),
-        );
-
-        await _deleteSession(topic);
-      } else {
-        await core.pairing.disconnect(topic: topic);
-      }
     } on ReownSignError catch (error, s) {
       core.logger.e(
         '[$runtimeType] disconnectSession()',
         error: error,
         stackTrace: s,
       );
+      return;
+    }
+
+    if (sessions.has(topic)) {
+      await _deleteSession(topic, reason: reason);
+    } else {
+      await core.pairing.disconnect(topic: topic);
     }
   }
 
@@ -920,13 +965,45 @@ class ReownSign implements IReownSign {
 
     // Subscribe to all the sessions
     for (final SessionData session in sessions.getAll()) {
+      if (_pendingSessionDeletions.has(session.topic) &&
+          !core.pairing.hasPendingResponse(topic: session.topic)) {
+        continue;
+      }
       core.logger.i('[$runtimeType] Resubscribe to session: ${session.topic}');
-      await core.relayClient.subscribe(
-        options: SubscribeOptions(
-          topic: session.topic,
-          transportType: session.transportType,
-        ),
-      );
+      try {
+        await core.relayClient.subscribe(
+          options: SubscribeOptions(
+            topic: session.topic,
+            transportType: session.transportType,
+          ),
+        );
+      } catch (error, stackTrace) {
+        if (sessions.has(session.topic) &&
+            !_pendingSessionDeletions.has(session.topic)) {
+          rethrow;
+        }
+        core.logger.e(
+          '[$runtimeType] retired session subscription failed',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      } finally {
+        // A late subscription ACK can restore transport after local retirement.
+        // Keep it only while an original response still needs this topic.
+        if ((!sessions.has(session.topic) ||
+                _pendingSessionDeletions.has(session.topic)) &&
+            !core.pairing.hasPendingResponse(topic: session.topic)) {
+          try {
+            await core.relayClient.unsubscribe(topic: session.topic);
+          } catch (error, stackTrace) {
+            core.logger.e(
+              '[$runtimeType] late session subscription cleanup failed',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          }
+        }
+      }
     }
   }
 
@@ -954,13 +1031,21 @@ class ReownSign implements IReownSign {
     return candidate;
   }
 
-  Future<void> _deleteSession(String topic, {bool expirerHasDeleted = false}) {
+  Future<void> _deleteSession(
+    String topic, {
+    bool expirerHasDeleted = false,
+    ReownSignError? reason,
+  }) {
     final active = _sessionDeletionOperations[topic];
     if (active != null) return active;
 
     late final Future<void> operation;
-    operation = _deleteSessionOnce(topic, expirerHasDeleted: expirerHasDeleted)
-        .whenComplete(() {
+    operation =
+        _deleteSessionOnce(
+          topic,
+          expirerHasDeleted: expirerHasDeleted,
+          reason: reason,
+        ).whenComplete(() {
           if (identical(_sessionDeletionOperations[topic], operation)) {
             _sessionDeletionOperations.remove(topic);
           }
@@ -972,6 +1057,7 @@ class ReownSign implements IReownSign {
   Future<void> _deleteSessionOnce(
     String topic, {
     required bool expirerHasDeleted,
+    ReownSignError? reason,
   }) async {
     final session = sessions.get(topic);
     final retainedPublicKey = _pendingSessionDeletions.get(topic);
@@ -979,11 +1065,38 @@ class ReownSign implements IReownSign {
 
     final newlyRevoked = retainedPublicKey == null;
     final publicKey = retainedPublicKey ?? session!.self.publicKey;
+    final canDeleteKeys = core.pairing.tryBeginResponseTopicTeardown(
+      topic: topic,
+    );
     if (newlyRevoked) {
       await _pendingSessionDeletions.set(topic, publicKey);
     }
 
-    if (!core.pairing.tryBeginResponseTopicTeardown(topic: topic)) {
+    // Revoke admission before any network wait, but keep the encryption key
+    // until notification has been encoded. A relay ACK is not a peer response.
+    if (reason != null &&
+        core.connectivity.isOnline.value &&
+        core.relayClient.isConnected) {
+      try {
+        await core.pairing.publishRequestAcknowledged(
+          topic,
+          MethodConstants.WC_SESSION_DELETE,
+          WcSessionDeleteRequest(
+            code: reason.code,
+            message: reason.message,
+            data: reason.data,
+          ).toJson(),
+        );
+      } catch (error, stackTrace) {
+        core.logger.e(
+          '[$runtimeType] session delete notification failed for $topic',
+          error: error,
+          stackTrace: stackTrace,
+        );
+      }
+    }
+
+    if (!canDeleteKeys) {
       core.pairing
           .waitForPendingResponses(topic: topic)
           .then<void>(
@@ -991,14 +1104,14 @@ class ReownSign implements IReownSign {
               topic,
               expirerHasDeleted: expirerHasDeleted,
             ),
-            onError: (Object error, StackTrace stackTrace) {
-              core.logger.e(
-                '[$runtimeType] pending response wait failed for session $topic',
-                error: error,
-                stackTrace: stackTrace,
-              );
-            },
-          );
+          )
+          .catchError((Object error, StackTrace stackTrace) {
+            core.logger.e(
+              '[$runtimeType] deferred session cleanup failed for $topic',
+              error: error,
+              stackTrace: stackTrace,
+            );
+          });
       if (newlyRevoked) {
         onSessionDelete.broadcast(SessionDelete(topic));
       }
@@ -1009,9 +1122,7 @@ class ReownSign implements IReownSign {
     await sessions.delete(topic);
     await core.crypto.deleteKeyPair(publicKey);
     await core.crypto.deleteSymKey(topic);
-    if (expirerHasDeleted) {
-      await core.expirer.delete(topic);
-    }
+    if (!expirerHasDeleted) await core.expirer.delete(topic);
     await _pendingSessionDeletions.delete(topic);
 
     if (newlyRevoked) {
@@ -1277,23 +1388,43 @@ class ReownSign implements IReownSign {
   ]) async {
     core.logger.d('_onSessionSettleRequest, topic: $topic, payload: $payload');
     final request = WcSessionSettleRequest.fromJson(payload.params);
+    SessionProposalCompleter? owner;
+    SessionData? session;
+    var accepted = false;
     try {
       await _isValidSessionSettleRequest(request.namespaces, request.expiry);
 
-      final sProposalCompleter = _proposalBySessionTopic.remove(topic);
-      if (sProposalCompleter == null ||
-          !pendingProposals.remove(sProposalCompleter)) {
+      final proposal = _proposalBySessionTopic[topic];
+      if (proposal == null ||
+          proposal.completer.isCompleted ||
+          !pendingProposals.contains(proposal) ||
+          sessions.has(topic)) {
         core.logger.d(
-          '[$runtimeType] ignoring settlement without a matching proposal '
+          '[$runtimeType] ignoring settlement without an available proposal '
           'owner, topic: $topic',
         );
         return;
       }
+      owner = proposal;
+      if (_isSessionTopicRetired(topic)) {
+        throw Errors.getSdkError(Errors.USER_DISCONNECTED).toSignError();
+      }
+
+      // Keep the proposal cancellable until all settlement allocations finish.
+      void checkRetirement() {
+        if (proposal.completer.isCompleted ||
+            !pendingProposals.contains(proposal) ||
+            !sessions.has(topic) ||
+            _isSessionTopicRetired(topic) ||
+            core.pairing.getPairing(topic: proposal.pairingTopic) == null) {
+          throw Errors.getSdkError(Errors.USER_DISCONNECTED).toSignError();
+        }
+      }
 
       // Create the session
-      final session = SessionData(
+      session = SessionData(
         topic: topic,
-        pairingTopic: sProposalCompleter.pairingTopic,
+        pairingTopic: proposal.pairingTopic,
         relay: request.relay,
         expiry: request.expiry,
         acknowledged: true,
@@ -1301,7 +1432,7 @@ class ReownSign implements IReownSign {
         namespaces: request.namespaces,
         sessionProperties: request.sessionProperties,
         self: ConnectionMetadata(
-          publicKey: sProposalCompleter.selfPublicKey,
+          publicKey: proposal.selfPublicKey,
           metadata: metadata,
         ),
         peer: request.controller,
@@ -1311,19 +1442,24 @@ class ReownSign implements IReownSign {
       );
 
       // Update all the things: session, expiry, metadata, pairing
-      sessions.set(topic, session);
-      _setSessionExpiry(topic, session.expiry);
+      await sessions.set(topic, session);
+      checkRetirement();
+      await _setSessionExpiry(topic, session.expiry);
+      checkRetirement();
       await core.pairing.updateMetadata(
-        topic: sProposalCompleter.pairingTopic,
+        topic: proposal.pairingTopic,
         metadata: session.peer.metadata,
       );
+      checkRetirement();
       final pairing = core.pairing.getPairing(topic: topic);
       if (pairing != null && !pairing.active) {
         await core.pairing.activate(topic: topic);
+        checkRetirement();
       }
 
-      // Send the session back to the completer
-      sProposalCompleter.completer.complete(session);
+      // Transfer ownership only when the session can actually be accepted.
+      accepted = true;
+      proposal.completer.complete(session);
 
       // Send back a success!
       // print('responding to session settle: acknolwedged');
@@ -1333,15 +1469,57 @@ class ReownSign implements IReownSign {
         MethodConstants.WC_SESSION_SETTLE,
         true,
       );
-      onSessionConnect.broadcast(SessionConnect(session));
-    } on ReownSignError catch (err) {
-      core.logger.e('_onSessionSettleRequest Error: $err');
-      await core.pairing.sendError(
-        payload.id,
-        topic,
-        payload.method,
-        JsonRpcError.invalidParams(err.message),
+      if (sessions.has(topic) && !_pendingSessionDeletions.has(topic)) {
+        onSessionConnect.broadcast(SessionConnect(session));
+      }
+    } catch (error, stackTrace) {
+      core.logger.e(
+        '_onSessionSettleRequest Error',
+        error: error,
+        stackTrace: stackTrace,
       );
+      if (accepted) rethrow;
+      if (owner != null && !owner.completer.isCompleted) {
+        owner.completer.completeError(error, stackTrace);
+      }
+      try {
+        // A retired topic no longer owns a key with which to reject settlement.
+        if (error is ReownSignError &&
+            error.code != Errors.getSdkError(Errors.USER_DISCONNECTED).code &&
+            (owner == null ||
+                core.pairing.getPairing(topic: owner.pairingTopic) != null) &&
+            !_pendingSessionDeletions.has(topic)) {
+          await core.pairing.sendError(
+            payload.id,
+            topic,
+            payload.method,
+            JsonRpcError.invalidParams(error.message),
+          );
+        }
+      } finally {
+        try {
+          if (session != null) {
+            await _deleteSession(topic);
+            // Settlement may finish setting expiry after disconnect removed
+            // the session. Its late expiry belongs to this cancelled attempt.
+            await core.expirer.delete(topic);
+          }
+        } finally {
+          if (owner != null) await _deleteProposalResources(owner);
+        }
+      }
+    } finally {
+      if (accepted && owner != null) {
+        try {
+          await _deleteProposalResources(owner);
+        } catch (error, stackTrace) {
+          core.logger.e(
+            '[$runtimeType] accepted proposal cleanup failed',
+            error: error,
+            stackTrace: stackTrace,
+          );
+        }
+      }
     }
   }
 
@@ -1472,6 +1650,8 @@ class ReownSign implements IReownSign {
       await _isValidRequest(topic, request.chainId, request.request);
 
       final tvf = collectRequestTVF(payload.id, request);
+      // Only incoming wallet requests need metadata retained for their reply.
+      if (tvf != null) pendingTVFRequests[payload.id] = tvf;
       core.logger.d(
         '[$runtimeType] _collect Request TVF, id: ${payload.id}, $tvf',
       );
@@ -1722,42 +1902,116 @@ class ReownSign implements IReownSign {
   void _registerInternalEvents() {
     core.relayClient.onRelayClientConnect.subscribe(_onRelayConnect);
     core.expirer.onExpire.subscribe(_onExpired);
-    core.pairing.onPairingDelete.subscribe(_onPairingDelete);
-    core.pairing.onPairingExpire.subscribe(_onPairingDelete);
+    final pairing = core.pairing;
+    if (pairing is Pairing) {
+      pairing.registerCleanup(_deletePairingResources);
+    }
+    // Subclasses may implement disconnect solely through the public events.
+    // Built-in cleanup is awaited first; repeating it here is idempotent.
+    pairing.onPairingDelete.subscribe(_onPairingDelete);
+    pairing.onPairingExpire.subscribe(_onPairingDelete);
     core.heartbeat.onPulse.subscribe(_heartbeatSubscription);
   }
 
   Future<void> _onRelayConnect(EventArgs? args) async {
     // print('Session: relay connected');
-    await _resubscribeAll();
+    try {
+      await _resubscribeAll();
+    } catch (error, stackTrace) {
+      core.logger.e(
+        '[$runtimeType] session resubscription failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    }
   }
 
-  Future<void> _onPairingDelete(PairingEvent? event) async {
-    core.logger.i('[$runtimeType] onPairingDelete ${event.toString()}');
-    // Delete all the sessions associated with the pairing
-    if (event == null) {
-      return;
-    }
+  void _onPairingDelete(PairingEvent? event) {
+    if (event?.topic == null) return;
+    _deletePairingResources(event!.topic!).catchError((
+      Object error,
+      StackTrace stackTrace,
+    ) {
+      core.logger.e(
+        '[$runtimeType] pairing resource cleanup failed',
+        error: error,
+        stackTrace: stackTrace,
+      );
+    });
+  }
 
-    // Delete the proposals
+  Future<void> _deletePairingResources(String topic) async {
+    core.logger.i('[$runtimeType] onPairingDelete $topic');
+    // Delete all the sessions associated with the pairing
     final List<ProposalData> proposalsToDelete = proposals
         .getAll()
-        .where((proposal) => proposal.pairingTopic == event.topic)
+        .where((proposal) => proposal.pairingTopic == topic)
         .toList();
 
-    for (final proposal in proposalsToDelete) {
-      await _deleteProposal(proposal.id);
-    }
-
-    // Delete the sessions
     final List<SessionData> sessionsToDelete = sessions
         .getAll()
-        .where((session) => session.pairingTopic == event.topic)
+        .where((session) => session.pairingTopic == topic)
         .toList();
 
+    // Only pending local proposals own proposer private keys. Incoming proposal
+    // metadata belongs to the peer; established sessions own their own keys.
+    final ownedProposals = pendingProposals
+        .where((proposal) => proposal.pairingTopic == topic)
+        .toList();
+    // Reject every pending connection before cleanup yields. A late response
+    // still belongs to its original handler and cannot approve this pairing.
+    for (final proposal in ownedProposals) {
+      if (!proposal.completer.isCompleted) {
+        proposal.completer.completeError(
+          Errors.getSdkError(Errors.USER_DISCONNECTED).toSignError(),
+        );
+      }
+    }
+
+    for (final proposal in proposalsToDelete) {
+      if (!ownedProposals.any((owner) => owner.id == proposal.id)) {
+        await _deleteProposal(proposal.id);
+        await core.expirer.delete(proposal.id.toString());
+      }
+    }
+    for (final proposal in ownedProposals) {
+      await _deleteProposalResources(proposal);
+    }
     for (final session in sessionsToDelete) {
       await _deleteSession(session.topic);
     }
+  }
+
+  Future<void> _deleteProposalResources(
+    SessionProposalCompleter proposal,
+  ) async {
+    await _deleteProposal(proposal.id);
+    await core.expirer.delete(proposal.id.toString());
+    final topics = _proposalBySessionTopic.entries
+        .where((entry) => identical(entry.value, proposal))
+        .map((entry) => entry.key)
+        .toList();
+    for (final topic in topics) {
+      if (!sessions.has(topic) && !_pendingSessionDeletions.has(topic)) {
+        await core.relayClient.unsubscribe(topic: topic);
+        await core.crypto.deleteSymKey(topic);
+      }
+    }
+    // Established sessions and authentication records retain their own keys.
+    if (!sessions.getAll().any(
+          (session) => session.self.publicKey == proposal.selfPublicKey,
+        ) &&
+        !authKeys.getAll().any(
+          (auth) => auth.publicKey == proposal.selfPublicKey,
+        ) &&
+        !_pendingSessionDeletions.data.containsValue(proposal.selfPublicKey)) {
+      await core.crypto.deleteKeyPair(proposal.selfPublicKey);
+    }
+    pendingProposals.remove(proposal);
+    // Preserve topics added while cleanup awaited; their handler cleans them.
+    _proposalBySessionTopic.removeWhere(
+      (topic, owner) => topics.contains(topic) && identical(owner, proposal),
+    );
   }
 
   Future<void> _onExpired(ExpirationEvent? event) async {
@@ -1789,8 +2043,14 @@ class ReownSign implements IReownSign {
 
   /// ---- Validation Helpers ---- ///
 
+  bool _isSessionTopicRetired(String topic) {
+    final pairing = core.pairing;
+    return _pendingSessionDeletions.has(topic) ||
+        (pairing is Pairing && pairing.isResponseTopicRetired(topic: topic));
+  }
+
   Future<bool> _isValidSessionTopic(String topic) async {
-    if (!sessions.has(topic) || _pendingSessionDeletions.has(topic)) {
+    if (!sessions.has(topic) || _isSessionTopicRetired(topic)) {
       throw Errors.getInternalError(
         Errors.NO_MATCHING_KEY,
         context: "session topic doesn't exist: $topic",
@@ -3078,10 +3338,8 @@ class ReownSign implements IReownSign {
       requestParams: request.request.params,
     );
 
-    // pendingTVFRequests is useful for WalletKit _onSessionRequest method
-    pendingTVFRequests[id] = tvfData;
-
-    // return is useful for AppKit's request() method
+    // Outgoing dapp requests carry this data directly to the relay. Retaining it
+    // is the receiving wallet's responsibility, until that wallet responds.
     return tvfData;
   }
 
@@ -3279,10 +3537,11 @@ class ReownSign implements IReownSign {
           if (signedXdr != null) {
             final id = response.id;
             final chainId = pendingTVFRequests[id]?.chainId;
-            final computedHash = StellarChainUtils.getStellarTxHashFromSignedXdr(
-              signedXdr.toString(),
-              chainId: chainId,
-            );
+            final computedHash =
+                StellarChainUtils.getStellarTxHashFromSignedXdr(
+                  signedXdr.toString(),
+                  chainId: chainId,
+                );
             return <String>[computedHash];
           }
         } catch (e) {

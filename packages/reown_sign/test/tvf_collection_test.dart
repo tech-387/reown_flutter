@@ -1,10 +1,13 @@
 import 'package:flutter_test/flutter_test.dart';
+import 'package:mockito/mockito.dart';
+import 'package:reown_core/pairing/pairing.dart';
 import 'package:reown_core/models/tvf_data.dart';
 import 'package:reown_core/reown_core.dart';
 import 'package:reown_core/store/generic_store.dart';
 import 'package:reown_sign/reown_sign.dart';
 
 import 'shared/shared_test_utils.dart';
+import 'shared/shared_test_utils.mocks.dart';
 import 'shared/shared_test_values.dart';
 
 void main() {
@@ -17,12 +20,15 @@ void main() {
     late ReownCore core;
 
     setUp(() async {
+      final socket = MockWebSocketHandler();
+      when(socket.connect()).thenThrow(StateError('Controlled transport only'));
       core = ReownCore(
         projectId: TEST_PROJECT_ID,
         relayUrl: TEST_RELAY_URL,
         memoryStore: true,
         logLevel: LogLevel.info,
         httpClient: getHttpWrapper(),
+        webSocketHandler: socket,
       );
 
       signEngine = ReownSign(
@@ -71,8 +77,30 @@ void main() {
       await signEngine.init();
     });
 
+    Future<void> receiveRequest({
+      required int requestId,
+      required String topic,
+      required String chainId,
+      required SessionRequestParams request,
+    }) async {
+      // Exercise the actual incoming protocol handler, without relay traffic.
+      final route = (core.pairing as Pairing)
+          .routerMapRequest[MethodConstants.WC_SESSION_REQUEST]!;
+      await route.function(
+        topic,
+        JsonRpcRequest(
+          id: requestId,
+          method: MethodConstants.WC_SESSION_REQUEST,
+          params: WcSessionRequestRequest(
+            chainId: chainId,
+            request: request,
+          ).toJson(),
+        ),
+      );
+    }
+
     group('TVF Collection through public methods', () {
-      test('should collect request TVF data when calling request()', () async {
+      test('outgoing request does not retain response metadata', () async {
         // Arrange
         final id = 123;
         final request = SessionRequestParams(
@@ -122,18 +150,11 @@ void main() {
             request: request,
           );
         } catch (e) {
-          // Expected to fail due to relay connection, but TVF should be collected
+          // The controlled transport cannot connect to the relay.
         }
 
-        // Assert - check if TVF data was stored
-        expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-        final tvfData = signEngine.pendingTVFRequests[id];
-        expect(tvfData, isNotNull);
-        expect(tvfData!.rpcMethods, equals(['eth_sendTransaction']));
-        expect(tvfData.chainId, equals('eip155:1'));
-        expect(tvfData.contractAddresses, isNull);
-        expect(tvfData.requestParams, equals(request.params));
-        expect(tvfData.txHashes, isNull);
+        // Dapp publication must not create wallet-side response ownership.
+        expect(signEngine.pendingTVFRequests, isEmpty);
       });
 
       test('should handle invalid contract data gracefully', () async {
@@ -186,14 +207,11 @@ void main() {
             request: request,
           );
         } catch (e) {
-          // Expected to fail due to relay connection, but TVF should be collected
+          // The controlled transport cannot connect to the relay.
         }
 
-        // Assert
-        expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-        final tvfData = signEngine.pendingTVFRequests[id];
-        expect(tvfData, isNotNull);
-        expect(tvfData!.contractAddresses, isNull);
+        // Invalid contract data must not leave outgoing metadata retained.
+        expect(signEngine.pendingTVFRequests, isEmpty);
       });
 
       test(
@@ -241,35 +259,16 @@ void main() {
 
           await signEngine.sessions.set('test_topic_5', session);
 
-          // First collect the request TVF
-          try {
-            await signEngine.request(
-              requestId: id,
-              topic: 'test_topic_5',
-              chainId: 'eip155:1',
-              request: request,
-            );
-          } catch (e) {
-            // Expected to fail due to relay connection
-          }
+          // Receive the wallet request and retain its response metadata.
+          await receiveRequest(
+            requestId: id,
+            topic: 'test_topic_5',
+            chainId: 'eip155:1',
+            request: request,
+          );
 
           // Verify request TVF was collected
           expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-
-          // Create a pending request in the store (required for validation)
-          final sessionRequest = SessionRequest(
-            id: id,
-            topic: 'test_topic_5',
-            method: 'eth_sendTransaction',
-            chainId: 'eip155:1',
-            params: request.params,
-            verifyContext: VerifyContext(
-              origin: 'test_origin',
-              verifyUrl: 'test_verify_url',
-              validation: Validation.VALID,
-            ),
-          );
-          await signEngine.pendingRequests.set(id.toString(), sessionRequest);
 
           // Create response
           final response = JsonRpcResponse(
@@ -333,35 +332,16 @@ void main() {
 
         await signEngine.sessions.set('test_topic_6', session);
 
-        // First collect the request TVF
-        try {
-          await signEngine.request(
-            requestId: id,
-            topic: 'test_topic_6',
-            chainId: 'eip155:1',
-            request: request,
-          );
-        } catch (e) {
-          // Expected to fail due to relay connection
-        }
+        // Receive the wallet request and retain its response metadata.
+        await receiveRequest(
+          requestId: id,
+          topic: 'test_topic_6',
+          chainId: 'eip155:1',
+          request: request,
+        );
 
         // Verify request TVF was collected
         expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-
-        // Create a pending request in the store (required for validation)
-        final sessionRequest = SessionRequest(
-          id: id,
-          topic: 'test_topic_6',
-          method: 'eth_sendTransaction',
-          chainId: 'eip155:1',
-          params: request.params,
-          verifyContext: VerifyContext(
-            origin: 'test_origin',
-            verifyUrl: 'test_verify_url',
-            validation: Validation.VALID,
-          ),
-        );
-        await signEngine.pendingRequests.set(id.toString(), sessionRequest);
 
         // Create response with error
         final response = JsonRpcResponse(
@@ -428,35 +408,16 @@ void main() {
 
           await signEngine.sessions.set('test_topic_7', session);
 
-          // First collect the request TVF
-          try {
-            await signEngine.request(
-              requestId: id,
-              topic: 'test_topic_7',
-              chainId: 'eip155:1',
-              request: request,
-            );
-          } catch (e) {
-            // Expected to fail due to relay connection
-          }
+          // Receive the wallet request and retain its response metadata.
+          await receiveRequest(
+            requestId: id,
+            topic: 'test_topic_7',
+            chainId: 'eip155:1',
+            request: request,
+          );
 
           // Verify request TVF was collected
           expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-
-          // Create a pending request in the store (required for validation)
-          final sessionRequest = SessionRequest(
-            id: id,
-            topic: 'test_topic_7',
-            method: 'wallet_sendCalls',
-            chainId: 'eip155:1',
-            params: request.params,
-            verifyContext: VerifyContext(
-              origin: 'test_origin',
-              verifyUrl: 'test_verify_url',
-              validation: Validation.VALID,
-            ),
-          );
-          await signEngine.pendingRequests.set(id.toString(), sessionRequest);
 
           // Create response with wallet_sendCalls 2.0.0 format
           final response = JsonRpcResponse(
@@ -538,35 +499,16 @@ void main() {
 
         await signEngine.sessions.set('test_topic_8', session);
 
-        // First collect the request TVF
-        try {
-          await signEngine.request(
-            requestId: id,
-            topic: 'test_topic_8',
-            chainId: 'eip155:1',
-            request: request,
-          );
-        } catch (e) {
-          // Expected to fail due to relay connection
-        }
+        // Receive the wallet request and retain its response metadata.
+        await receiveRequest(
+          requestId: id,
+          topic: 'test_topic_8',
+          chainId: 'eip155:1',
+          request: request,
+        );
 
         // Verify request TVF was collected
         expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-
-        // Create a pending request in the store (required for validation)
-        final sessionRequest = SessionRequest(
-          id: id,
-          topic: 'test_topic_8',
-          method: 'eth_sendTransaction',
-          chainId: 'eip155:1',
-          params: request.params,
-          verifyContext: VerifyContext(
-            origin: 'test_origin',
-            verifyUrl: 'test_verify_url',
-            validation: Validation.VALID,
-          ),
-        );
-        await signEngine.pendingRequests.set(id.toString(), sessionRequest);
 
         // Create response with simple transaction hash
         final response = JsonRpcResponse(id: id, result: '0x1234567890abcdef');
@@ -630,35 +572,16 @@ void main() {
 
           await signEngine.sessions.set('test_topic_9', session);
 
-          // First collect the request TVF
-          try {
-            await signEngine.request(
-              requestId: id,
-              topic: 'test_topic_9',
-              chainId: 'ton:mainnet',
-              request: request,
-            );
-          } catch (e) {
-            // Expected to fail due to relay connection
-          }
+          // Receive the wallet request and retain its response metadata.
+          await receiveRequest(
+            requestId: id,
+            topic: 'test_topic_9',
+            chainId: 'ton:mainnet',
+            request: request,
+          );
 
           // Verify request TVF was collected
           expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-
-          // Create a pending request in the store (required for validation)
-          final sessionRequest = SessionRequest(
-            id: id,
-            topic: 'test_topic_9',
-            method: 'ton_sendTransaction',
-            chainId: 'ton:mainnet',
-            params: request.params,
-            verifyContext: VerifyContext(
-              origin: 'test_origin',
-              verifyUrl: 'test_verify_url',
-              validation: Validation.VALID,
-            ),
-          );
-          await signEngine.pendingRequests.set(id.toString(), sessionRequest);
 
           // Create response with TON transaction hash
           final response = JsonRpcResponse(
@@ -717,9 +640,8 @@ void main() {
         expect(tvfData.requestParams, equals(request.request.params));
         expect(tvfData.txHashes, isNull);
 
-        // Check if stored in pendingTVFRequests
-        expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
-        expect(signEngine.pendingTVFRequests[id], equals(tvfData));
+        // Building request metadata does not claim a wallet response.
+        expect(signEngine.pendingTVFRequests, isEmpty);
       });
 
       test('should collect contract address for EVM contract calls', () {
@@ -849,7 +771,10 @@ void main() {
         );
 
         // First collect request TVF
-        signEngine.collectRequestTVF(id, request);
+        signEngine.pendingTVFRequests[id] = signEngine.collectRequestTVF(
+          id,
+          request,
+        )!;
         expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
 
         // Create response
@@ -890,7 +815,10 @@ void main() {
         );
 
         // First collect request TVF
-        signEngine.collectRequestTVF(id, request);
+        signEngine.pendingTVFRequests[id] = signEngine.collectRequestTVF(
+          id,
+          request,
+        )!;
         expect(signEngine.pendingTVFRequests.containsKey(id), isTrue);
 
         // Create response
@@ -951,7 +879,10 @@ void main() {
         );
 
         // First collect request TVF
-        signEngine.collectRequestTVF(id, request);
+        signEngine.pendingTVFRequests[id] = signEngine.collectRequestTVF(
+          id,
+          request,
+        )!;
 
         // Create response with error
         final response = JsonRpcResponse(

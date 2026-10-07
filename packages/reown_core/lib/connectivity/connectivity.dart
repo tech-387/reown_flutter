@@ -15,7 +15,7 @@ class ConnectivityState implements IConnectivity {
   }) : _core = core,
        _connectivity = connectivity;
 
-  late StreamSubscription<List<ConnectivityResult>> _connectivitySubscription;
+  StreamSubscription<List<ConnectivityResult>>? _connectivitySubscription;
 
   bool _initialized = false;
 
@@ -57,6 +57,7 @@ class ConnectivityState implements IConnectivity {
 
   @override
   Future<void> dispose() async {
-    await _connectivitySubscription.cancel();
+    await _connectivitySubscription?.cancel();
+    _connectivitySubscription = null;
   }
 }

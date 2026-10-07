@@ -49,6 +49,13 @@ abstract class IPairing {
   List<PairingInfo> getPairings();
   PairingInfo? getPairing({required String topic});
   Future<void> ping({required String topic});
+
+  /// Retires the local pairing, its Sign sessions and connection proposals.
+  /// Notification failures are logged, not returned as local cleanup failures.
+  /// Completion does not imply peer acknowledgement. Keys/subscriptions needed
+  /// by existing response waiters are retained until those waiters settle.
+  /// Pending local session proposals fail with USER_DISCONNECTED.
+  /// Retired topics cannot authorize new work in this runtime.
   Future<void> disconnect({required String topic});
   IPairingStore getStore();
 
@@ -65,9 +72,12 @@ abstract class IPairing {
     RequestPublicationController? publication,
   });
 
-  /// Publishes a relay request after positive relay acknowledgement.
+  /// Publishes a relay request and waits for positive relay acknowledgement.
   ///
   /// This does not register or await a response.
+  /// Encoding and relay acknowledgement share a five-second deadline. The
+  /// built-in relay also prevents a send from starting after that deadline;
+  /// custom acknowledgement-only relays retain their own send lifecycle.
   Future<void> publishRequestAcknowledged(
     String topic,
     String method,
@@ -91,9 +101,9 @@ abstract class IPairing {
   /// Completes when every exact pending response for [topic] is terminal.
   Future<void> waitForPendingResponses({required String topic});
 
-  /// Atomically reserves [topic] for teardown when it has no pending responses.
-  ///
-  /// Once reserved, no new response waiter can be registered for the topic.
+  /// Revokes new publication and cancels registered requests still unsent.
+  /// Returns whether no original pending response still needs [topic].
+  /// Existing sent waiters remain restorable; new waiters cannot be registered.
   bool tryBeginResponseTopicTeardown({required String topic});
 
   /// Returns valid JSON-RPC envelopes recorded for [topic].
@@ -110,7 +120,9 @@ abstract class IPairing {
   /// Removes only the pending response waiter matching the exact request.
   ///
   /// This does not cancel or publish anything. It is intended for callers that
-  /// have independently proved the original request terminal.
+  /// have independently ended observation of the original request. Its pending
+  /// future completes with a local [StateError]; this is not a wallet rejection
+  /// or proof that a submitted transaction was cancelled.
   bool forgetPendingResponse({
     required String topic,
     required int requestId,
