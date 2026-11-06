@@ -255,18 +255,18 @@ class ReownSignClient implements IReownSignClient {
   @override
   Future<dynamic> request({
     int? requestId,
-    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
+    RequestPublicationController? publication,
   }) async {
     try {
       return await engine.request(
         requestId: requestId,
-        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,
+        publication: publication,
       );
     } catch (e) {
       rethrow;

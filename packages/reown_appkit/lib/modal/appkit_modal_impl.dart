@@ -115,11 +115,6 @@ class ReownAppKitModal
   bool get hasNamespaces => _sessionNamespaces.isNotEmpty;
 
   String _wcUri = '';
-  Object? _connectionAttempt;
-  ProposalData? _pendingProposal;
-  // Retain unaccepted proposal identities for this modal's lifetime: deleting
-  // proposal storage does not stop Sign from delivering a cancelled approval.
-  final Set<String> _modalProposalKeys = {};
   @override
   String? get wcUri => _wcUri;
 
@@ -591,13 +586,8 @@ class ReownAppKitModal
   }
 
   Future<void> _setSesionAndChainData(ReownAppKitModalSession mSession) async {
-    final attempt = _connectionAttempt;
     try {
       await _storeSession(mSession);
-      if (!identical(_currentSession, mSession) ||
-          !identical(_connectionAttempt, attempt)) {
-        return;
-      }
       _selectedChainID = _selectedChainID ?? mSession.chainId;
       await _setLocalEthChain(_selectedChainID!, logEvent: false);
     } catch (e) {
@@ -623,7 +613,6 @@ class ReownAppKitModal
   }
 
   Future<void> _storeSession(ReownAppKitModalSession modalSession) async {
-    final attempt = _connectionAttempt;
     _currentSession = modalSession;
     try {
       await _storage.set(
@@ -634,10 +623,7 @@ class ReownAppKitModal
       _appKit.core.logger.e('[$runtimeType] _storeSession error: $e');
     }
     // _isConnected shoudl probably go at the very end of the connection
-    if (identical(_currentSession, modalSession) &&
-        identical(_connectionAttempt, attempt)) {
-      _isConnected = true;
-    }
+    _isConnected = true;
   }
 
   Future<void> _selectChainFromStoredId() async {
@@ -1077,10 +1063,7 @@ class ReownAppKitModal
     PlatformType pType,
     AppKitSocialOption? socialOption,
   ) async {
-    final connection = buildConnectionUri();
-    final attempt = _connectionAttempt;
-    await connection;
-    if (!identical(_connectionAttempt, attempt)) return;
+    await buildConnectionUri();
     final linkMode = redirect.linkMode ?? '';
     if (linkMode.isNotEmpty && _wcUri.startsWith(linkMode)) {
       await ReownCoreUtils.openURL(_wcUri);
@@ -1104,19 +1087,14 @@ class ReownAppKitModal
   @override
   Future<void> buildConnectionUri() async {
     if (!_isConnected) {
-      final attempt = Object();
-      _connectionAttempt = attempt;
-      _pendingProposal = null;
       try {
         await reconnectRelay();
-        if (!identical(_connectionAttempt, attempt)) return;
         if (_siweService.enabled) {
           final walletRedirect = _explorerService.getWalletRedirect(
             _selectedWallet,
           );
           final nonce = await _siweService.getNonce();
           final p1 = await _siweService.config!.getMessageParams();
-          if (!identical(_connectionAttempt, attempt)) return;
           final methods =
               p1.methods ?? NetworkUtils.defaultNetworkMethods['eip155'];
           //
@@ -1135,87 +1113,41 @@ class ReownAppKitModal
             params: authParams,
             walletUniversalLink: walletRedirect?.linkMode,
           );
-          final proposal = _appKit.proposals
-              .getAll()
-              .where(
-                (proposal) =>
-                    proposal.pairingTopic == authResponse.pairingTopic,
-              )
-              .firstOrNull;
-          if (proposal != null) {
-            _modalProposalKeys.add(proposal.proposer.publicKey);
-          }
-          _awaitOCAuthCallback(authResponse, attempt);
-          if (!identical(_connectionAttempt, attempt)) {
-            if (_connectionAttempt == null) {
-              _pendingProposal ??= proposal;
-            }
-            return;
-          }
-          _pendingProposal = proposal;
           _wcUri = authResponse.uri?.toString() ?? '';
           _notify();
+          _awaitOCAuthCallback(authResponse);
         } else {
           final connectResponse = await _appKit.connect(
             optionalNamespaces: _sessionNamespaces,
             // TODO implement `authentication` param to support 1CA for non-EVM
             // authentication: [authParams],
           );
-          final proposal = _appKit.proposals
-              .getAll()
-              .where(
-                (proposal) =>
-                    proposal.pairingTopic == connectResponse.pairingTopic,
-              )
-              .firstOrNull;
-          if (proposal != null) {
-            _modalProposalKeys.add(proposal.proposer.publicKey);
-          }
-          _awaitConnectionCallback(connectResponse, attempt);
-          if (!identical(_connectionAttempt, attempt)) {
-            if (_connectionAttempt == null) {
-              _pendingProposal ??= proposal;
-            }
-            return;
-          }
-          _pendingProposal = proposal;
           _wcUri = connectResponse.uri?.toString() ?? '';
           _notify();
+          _awaitConnectionCallback(connectResponse);
         }
       } catch (e) {
-        if (identical(_connectionAttempt, attempt)) {
-          _connectionAttempt = null;
-        }
         _appKit.core.logger.e('[$runtimeType] buildConnectionUri error: $e');
         rethrow;
       }
     }
   }
 
-  void _awaitConnectionCallback(
-    ConnectResponse connectResponse,
-    Object attempt,
-  ) async {
+  void _awaitConnectionCallback(ConnectResponse connectResponse) async {
     try {
       final _ = await connectResponse.session.future;
     } on TimeoutException {
       _appKit.core.logger.i('[$runtimeType] Rebuilding session, ending future');
       return;
     } catch (e) {
-      if (!identical(_connectionAttempt, attempt)) return;
-      await _connectionErrorHandler(e, connectResponse.pairingTopic);
+      await _connectionErrorHandler(e);
     }
   }
 
   SessionAuthResponse? _sessionAuthResponse;
-  void _awaitOCAuthCallback(
-    SessionAuthRequestResponse authResponse,
-    Object attempt,
-  ) async {
+  void _awaitOCAuthCallback(SessionAuthRequestResponse authResponse) async {
     try {
-      final response = await authResponse.completer.future;
-      if (!identical(_connectionAttempt, attempt)) return;
-      _sessionAuthResponse = response;
+      _sessionAuthResponse = await authResponse.completer.future;
       _supportsOneClickAuth = true;
       if (_sessionAuthResponse?.session != null) {
         _appKit.onSessionConnect.broadcast(
@@ -1233,12 +1165,12 @@ class ReownAppKitModal
       _appKit.core.logger.i('[$runtimeType] Rebuilding session, ending future');
       return;
     } catch (e) {
-      if (!identical(_connectionAttempt, attempt)) return;
-      await _connectionErrorHandler(e, authResponse.pairingTopic);
+      await disconnect();
+      await _connectionErrorHandler(e);
     }
   }
 
-  Future<void> _connectionErrorHandler(dynamic e, String pairingTopic) async {
+  Future<void> _connectionErrorHandler(dynamic e) async {
     if (_isUserRejectedError(e)) {
       onModalError.broadcast(UserRejectedConnection());
       _analyticsService.sendEvent(UserRejectedEvent());
@@ -1269,12 +1201,7 @@ class ReownAppKitModal
         _pendingSocialLogin = null;
       }
     }
-    if (_pendingProposal?.pairingTopic == pairingTopic) {
-      _connectionAttempt = null;
-    }
-    if (_appKit.pairings.get(pairingTopic)?.active == false) {
-      await _appKit.core.expirer.expire(pairingTopic);
-    }
+    return await expirePreviousInactivePairings();
   }
 
   bool get _isLinkMode {
@@ -1289,11 +1216,7 @@ class ReownAppKitModal
   @override
   void launchConnectedWallet() async {}
 
-  void _launchRequestOnWallet(
-    int requestId,
-    ReownAppKitModalSession requestSession,
-  ) async {
-    if (_isDisposed || _currentSession?.topic != requestSession.topic) return;
+  void _launchRequestOnWallet(int requestId) async {
     _checkInitialized();
 
     final walletInfo = _explorerService.getConnectedWallet();
@@ -1304,28 +1227,28 @@ class ReownAppKitModal
       return;
     }
 
-    final isCoinbase = requestSession.sessionService.isCoinbase == true;
+    final isCoinbase = _currentSession!.sessionService.isCoinbase == true;
     if (walletInfo.isCoinbase || isCoinbase) {
       // Coinbase Wallet is getting launched at every request by its service
       // So no need to do it here.
       return;
     }
 
-    final isPhantom = requestSession.sessionService.isPhantom == true;
+    final isPhantom = _currentSession!.sessionService.isPhantom == true;
     if (walletInfo.isPhantom || isPhantom) {
       // Phantom Wallet is getting launched at every request by its service
       // So no need to do it here.
       return;
     }
 
-    final isSolflare = requestSession.sessionService.isSolflare == true;
+    final isSolflare = _currentSession!.sessionService.isSolflare == true;
     if (walletInfo.isSolflare || isSolflare) {
       // Solflare Wallet is getting launched at every request by its service
       // So no need to do it here.
       return;
     }
 
-    if (requestSession.sessionService.isMagic) {
+    if (_currentSession!.sessionService.isMagic) {
       // There's no wallet to launch when connected with Email
       // TODO check if this is still relevant with web-wallet
       return;
@@ -1342,15 +1265,15 @@ class ReownAppKitModal
     }
 
     try {
-      final topic = requestSession.topic!;
-      final metadataRedirect = requestSession.peer?.metadata.redirect;
+      final topic = _currentSession!.topic!;
+      final metadataRedirect = _currentSession!.peer?.metadata.redirect;
       final link = metadataRedirect?.native ?? metadataRedirect?.universal;
       final redirect = walletRedirect.copyWith(
         // /wc path will be added in CoreUtils
         mobile: link != null ? _removeWcPath(link) : null,
       );
       final platform = PlatformUtils.getPlatformType();
-      await _uriService.openRedirect(
+      _uriService.openRedirect(
         redirect,
         pType: platform,
         wcURI: 'requestId=$requestId&sessionTopic=$topic',
@@ -1382,18 +1305,6 @@ class ReownAppKitModal
   @override
   Future<void> disconnect({bool disconnectAllSessions = true}) async {
     _checkInitialized();
-    final session = _currentSession;
-    final sessionsToDisconnect = disconnectAllSessions
-        ? _appKit.sessions.getAll().toList()
-        : <SessionData>[];
-    _connectionAttempt = null;
-
-    bool ownsSession() =>
-        _connectionAttempt == null &&
-        (_currentSession == null ||
-            (session?.topic != null
-                ? _currentSession?.topic == session?.topic
-                : identical(_currentSession, session)));
 
     String? namespace;
     try {
@@ -1405,51 +1316,46 @@ class ReownAppKitModal
       // return;
       await reconnectRelay();
     }
-    if (!ownsSession()) return;
 
     _status = ReownAppKitModalStatus.initializing;
     _notify();
 
-    if (session?.sessionService.isCoinbase == true) {
+    if (_currentSession?.sessionService.isCoinbase == true) {
       try {
         await _coinbaseService.resetSession();
       } catch (e) {
         _appKit.core.logger.d('[$runtimeType] disconnect coinbase $e');
-        if (!ownsSession()) return;
         _status = ReownAppKitModalStatus.initialized;
         _notify();
         return;
       }
     }
-    if (session?.sessionService.isPhantom == true) {
+    if (_currentSession?.sessionService.isPhantom == true) {
       try {
         await _phantomService.disconnect();
       } catch (e) {
         _appKit.core.logger.d('[$runtimeType] disconnect phantom $e');
-        if (!ownsSession()) return;
         _status = ReownAppKitModalStatus.initialized;
         _notify();
         return;
       }
     }
-    if (session?.sessionService.isSolflare == true) {
+    if (_currentSession?.sessionService.isSolflare == true) {
       try {
         await _solflareService.disconnect();
       } catch (e) {
         _appKit.core.logger.d('[$runtimeType] disconnect solflare $e');
-        if (!ownsSession()) return;
         _status = ReownAppKitModalStatus.initialized;
         _notify();
         return;
       }
     }
-    if (session?.sessionService.isMagic == true) {
+    if (_currentSession?.sessionService.isMagic == true) {
       try {
         await Future.delayed(Duration(milliseconds: 300));
         await _magicService.disconnect();
       } catch (e) {
         _appKit.core.logger.d('[$runtimeType] disconnect magic $e');
-        if (!ownsSession()) return;
         _status = ReownAppKitModalStatus.initialized;
         _notify();
         return;
@@ -1459,37 +1365,34 @@ class ReownAppKitModal
     try {
       // If we want to disconnect all sessions, loop through them and disconnect them
       if (disconnectAllSessions) {
-        for (final target in sessionsToDisconnect) {
-          await _disconnectSession(target.pairingTopic, target.topic);
+        for (final SessionData session in _appKit.sessions.getAll()) {
+          await _disconnectSession(session.pairingTopic, session.topic);
         }
       } else {
         // Disconnect the session
-        await _disconnectSession(session?.pairingTopic, session?.topic);
+        await _disconnectSession(
+          _currentSession?.pairingTopic,
+          _currentSession?.topic,
+        );
       }
-      if (!ownsSession()) return;
       try {
         if (_siweService.signOutOnDisconnect) {
           await _siweService.signOut();
         }
       } catch (_) {}
-      if (!ownsSession()) return;
 
       _analyticsService.sendEvent(DisconnectSuccessEvent(namespace: namespace));
-      if (!(session?.sessionService.isWC == true)) {
+      if (!(_currentSession?.sessionService.isWC == true)) {
         // if sessionService.isWC then _cleanSession() is being called on sessionDelete event
         return await _cleanSession();
       }
       return;
     } catch (e) {
-      if (session?.topic != null) {
-        await _appKit.sessions.delete(session!.topic!);
+      if (_currentSession?.topic != null) {
+        _appKit.sessions.delete(_currentSession!.topic!);
       }
+      await _cleanSession();
       _analyticsService.sendEvent(DisconnectErrorEvent());
-      if (!ownsSession()) return;
-      await _cleanSession(
-        args: session?.topic == null ? null : SessionDelete(session!.topic!),
-      );
-      if (!ownsSession()) return;
       _status = ReownAppKitModalStatus.initialized;
       _notify();
     }
@@ -1517,9 +1420,6 @@ class ReownAppKitModal
       return;
     }
     _isOpen = false;
-    if (!_isConnected) {
-      _connectionAttempt = null;
-    }
     final currentKey = _widgetStack.getCurrent().key;
     if (_disconnectOnClose) {
       _disconnectOnClose = false;
@@ -1702,8 +1602,6 @@ class ReownAppKitModal
 
   @override
   Future<dynamic> request({
-    int? requestId,
-    RequestPublicationController? publication,
     required String? topic,
     required String chainId,
     required SessionRequestParams request,
@@ -1746,43 +1644,18 @@ class ReownAppKitModal
         );
       }
 
-      final requestSession = _currentSession!;
-      final id = requestId ?? JsonRpcUtils.payloadId();
+      final requestId = JsonRpcUtils.payloadId();
       final pendingRequest = _appKit.request(
-        requestId: id,
-        publication: publication,
+        requestId: requestId,
         topic: topic!,
         chainId: chainId,
         request: request,
       );
 
-      var awaitingResponse = true;
-      if (publication == null) {
-        if (topic == requestSession.topic) {
-          _launchRequestOnWallet(id, requestSession);
-        }
-      } else {
-        unawaited(
-          publication.acknowledged.then((_) {
-            final expiry = publication.expiryTimestamp;
-            if (awaitingResponse &&
-                !publication.isCancellationRequested &&
-                (expiry == null ||
-                    DateTime.now().millisecondsSinceEpoch < expiry * 1000) &&
-                topic == requestSession.topic) {
-              _launchRequestOnWallet(id, requestSession);
-            }
-          }),
-        );
-      }
+      _launchRequestOnWallet(requestId);
 
-      try {
-        return await pendingRequest;
-      } finally {
-        awaitingResponse = false;
-      }
+      return await pendingRequest;
     } catch (e) {
-      if (e is RequestPublicationCancelled) rethrow;
       if (_isUserRejectedError(e)) {
         onModalError.broadcast(UserRejectedRequest());
       } else if (e is CoinbaseServiceException) {
@@ -1791,6 +1664,7 @@ class ReownAppKitModal
         throw ReownAppKitModalException('Coinbase Wallet Error');
       } else if (e is ReownSignError) {
         onModalError.broadcast(ModalError(e.message));
+        return;
       }
       rethrow;
     }
@@ -1798,7 +1672,6 @@ class ReownAppKitModal
 
   @override
   Future<void> dispose() async {
-    _isDisposed = true;
     if (_status == ReownAppKitModalStatus.initialized) {
       _unregisterListeners();
       if (_disconnectOnDispose) {
@@ -1832,6 +1705,7 @@ class ReownAppKitModal
       await Future.delayed(Duration(milliseconds: 500));
       _notify();
     }
+    _isDisposed = true;
     _isOpen = false;
     super.dispose();
   }
@@ -2108,26 +1982,20 @@ class ReownAppKitModal
         reason: Errors.getSdkError(Errors.USER_DISCONNECTED).toSignError(),
       );
     }
-    if (pairingTopic != null &&
-        !_appKit.sessions.getAll().any(
-          (session) =>
-              session.topic != topic && session.pairingTopic == pairingTopic,
-        ) &&
-        !(_connectionAttempt != null &&
-            _pendingProposal?.pairingTopic == pairingTopic)) {
+    if (pairingTopic != null) {
       await _appKit.core.pairing.disconnect(topic: pairingTopic);
     }
   }
 
+  Future<void> _deleteStorage() async {
+    await _storage.delete(StorageConstants.selectedChainId);
+    await _storage.delete(StorageConstants.modalSession);
+  }
+
   Future<void> _cleanSession({SessionDelete? args, bool event = true}) async {
-    if (args != null && args.topic != _currentSession?.topic) return;
-    final topic = args?.topic ?? _currentSession?.topic;
-    if (_pendingProposal != null &&
-        _pendingProposal!.proposer.publicKey ==
-            _currentSession?.self?.publicKey) {
-      _connectionAttempt = null;
-    }
     _blockchainService.dispose();
+    await _deleteStorage();
+
     _selectedChainID = null;
     _isConnected = false;
     _currentSession = null;
@@ -2136,14 +2004,13 @@ class ReownAppKitModal
     _status = ReownAppKitModalStatus.initialized;
     _notify();
 
-    await _storage.delete(StorageConstants.selectedChainId);
-    if (_currentSession == null) {
-      await _storage.delete(StorageConstants.modalSession);
-    }
     if (event) {
       Future.delayed(Duration(milliseconds: 200), () {
         onModalDisconnect.broadcast(
-          ModalDisconnect(topic: topic, id: args?.id),
+          ModalDisconnect(
+            topic: args?.topic ?? _currentSession?.topic,
+            id: args?.id,
+          ),
         );
       });
     }
@@ -2580,14 +2447,9 @@ extension _AppKitModalExtension on ReownAppKitModal {
     _appKit.core.logger.d(
       '[$runtimeType] _onSessionAuthResponse: $debugString',
     );
-    if (args?.session != null && _ownsSessionConnect(args!.session!)) {
+    if (args?.session != null) {
       // IF 1-CA SUPPORTED WE SHOULD CALL SIWECONGIF METHODS HERE
-      final attempt = _connectionAttempt;
-      final session = await _settleSession(args.session!);
-      if (_currentSession?.topic != session.topic ||
-          !identical(_connectionAttempt, attempt)) {
-        return;
-      }
+      final session = await _settleSession(args!.session!);
       //
       try {
         // Verify message with just the first cacao
@@ -2597,10 +2459,6 @@ extension _AppKitModalExtension on ReownAppKitModal {
           cacaoPayload: CacaoRequestPayload.fromCacaoPayload(cacao.p),
         );
         final clientId = await _appKit.core.crypto.getClientId();
-        if (_currentSession?.topic != session.topic ||
-            !identical(_connectionAttempt, attempt)) {
-          return;
-        }
         await _siweService.verifyMessage(
           message: message,
           signature: cacao.s.s,
@@ -2611,45 +2469,15 @@ extension _AppKitModalExtension on ReownAppKitModal {
           '[$runtimeType] onSessionAuthResponse $e',
           stackTrace: s,
         );
-        if (_currentSession?.topic == session.topic &&
-            identical(_connectionAttempt, attempt)) {
-          try {
-            await _disconnectSession(session.pairingTopic, session.topic);
-          } catch (e, s) {
-            _appKit.core.logger.e(
-              '[$runtimeType] disconnect failed auth session $e',
-              stackTrace: s,
-            );
-            await _appKit.sessions.delete(session.topic!);
-            if (_currentSession?.topic == session.topic &&
-                identical(_connectionAttempt, attempt)) {
-              await _cleanSession(args: SessionDelete(session.topic!));
-            }
-          }
-        }
-        return;
-      }
-      if (_currentSession?.topic != session.topic ||
-          !identical(_connectionAttempt, attempt)) {
+        await disconnect();
         return;
       }
       //
       final siweSession = await _siweService.getSession();
-      if (_currentSession?.topic != session.topic ||
-          !identical(_connectionAttempt, attempt)) {
-        return;
-      }
-      final newSession = _currentSession!.copyWith(siweSession: siweSession);
+      final newSession = session.copyWith(siweSession: siweSession);
       //
       await _storeSession(newSession);
-      if (_currentSession?.topic != newSession.topic ||
-          !identical(_connectionAttempt, attempt)) {
-        return;
-      }
-      _connectionAttempt = null;
-      _pendingProposal = null;
-      _modalProposalKeys.remove(session.self?.publicKey);
-      onModalConnect.broadcast(ModalConnect(_currentSession!));
+      onModalConnect.broadcast(ModalConnect(newSession));
       //
       if (_isOpen) {
         closeModal();
@@ -2658,23 +2486,12 @@ extension _AppKitModalExtension on ReownAppKitModal {
   }
 
   void _onSessionConnect(SessionConnect? args) async {
-    if (args == null ||
-        !_ownsSessionConnect(args.session) ||
-        (_supportsOneClickAuth && _siweService.enabled)) {
+    if (args == null || (_supportsOneClickAuth && _siweService.enabled)) {
       // Will be handled by _onSessionAuthResponse
       return;
     }
 
-    final attempt = _connectionAttempt;
-    final settled = await _settleSession(args.session);
-    if (_currentSession?.topic != settled.topic ||
-        !identical(_connectionAttempt, attempt)) {
-      return;
-    }
-    final session = _currentSession!;
-    _connectionAttempt = null;
-    _pendingProposal = null;
-    _modalProposalKeys.remove(session.self?.publicKey);
+    final session = await _settleSession(args.session);
     onModalConnect.broadcast(ModalConnect(session));
     _appKit.core.logger.d(
       '[$runtimeType] _onSessionConnect: ${jsonEncode(session.toJson())}',
@@ -2695,32 +2512,14 @@ extension _AppKitModalExtension on ReownAppKitModal {
     }
   }
 
-  bool _ownsSessionConnect(SessionData session) {
-    // A fresh proposal may reuse the pairing, but always has its own key.
-    final isPendingProposal =
-        _pendingProposal?.proposer.publicKey == session.self.publicKey;
-    if (_connectionAttempt != null) {
-      return isPendingProposal;
-    }
-    if (_currentSession != null) {
-      return _currentSession?.topic == session.topic;
-    }
-    return !_modalProposalKeys.contains(session.self.publicKey);
-  }
-
   // HAS TO BE CALLED JUST ONCE ON CONNECTION
   Future<ReownAppKitModalSession> _settleSession(SessionData mSession) async {
-    final attempt = _connectionAttempt;
     _selectedChainID ??= NamespaceUtils.getChainIdsFromNamespaces(
       namespaces: mSession.namespaces,
     ).first;
 
     final session = ReownAppKitModalSession(sessionData: mSession);
     await _setSesionAndChainData(session);
-    if (_currentSession?.topic != session.topic ||
-        !identical(_connectionAttempt, attempt)) {
-      return session;
-    }
     if (_selectedWallet == null) {
       _analyticsService.sendEvent(
         ConnectSuccessEvent(
@@ -2792,11 +2591,10 @@ extension _AppKitModalExtension on ReownAppKitModal {
     }
 
     onSessionEventEvent.broadcast(args);
-    if (args == null || args.topic != _currentSession?.topic) return;
-    if (args.name == EventsConstants.chainChanged) {
-      _selectedChainID = args.chainId;
+    if (args?.name == EventsConstants.chainChanged) {
+      _selectedChainID = args?.chainId;
     }
-    if (args.name == EventsConstants.accountsChanged) {
+    if (args?.name == EventsConstants.accountsChanged) {
       if (_siweService.enabled && _siweService.signOutOnAccountChange) {
         try {
           await _siweService.signOut();
@@ -2805,20 +2603,20 @@ extension _AppKitModalExtension on ReownAppKitModal {
         }
       }
     }
-    if (args.topic != _currentSession?.topic) return;
     _notify();
   }
 
   void _onSessionUpdate(SessionUpdate? args) async {
     _appKit.core.logger.d('[$runtimeType] _onSessionUpdate $args');
-    if (args != null && args.topic == _currentSession?.topic) {
+    if (args != null) {
+      final wcSessions = _appKit.sessions.getAll();
+      if (wcSessions.isEmpty) return;
+      //
       final session = _appKit.sessions.get(args.topic);
-      if (session == null) return;
       final updatedSession = ReownAppKitModalSession(
-        sessionData: session.copyWith(namespaces: args.namespaces),
+        sessionData: session!.copyWith(namespaces: args.namespaces),
       );
       await _setSesionAndChainData(updatedSession);
-      if (!identical(_currentSession, updatedSession)) return;
       onSessionUpdateEvent.broadcast(args);
       onModalUpdate.broadcast(ModalConnect(updatedSession));
     }

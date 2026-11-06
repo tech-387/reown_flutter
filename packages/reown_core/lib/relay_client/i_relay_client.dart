@@ -54,26 +54,12 @@ abstract class IRelayClient {
   Future<void> disconnect();
 }
 
-/// Optional relay capability that reports whether publication was accepted.
-///
-/// It is separate from [IRelayClient] so existing custom relay implementations
-/// remain source-compatible.
-abstract interface class IAcknowledgedRelayClient {
-  /// Publishes [message] and waits for the relay's JSON-RPC acknowledgement.
-  ///
-  /// Returns `true` only for a successful relay acknowledgement. A `true`
-  /// result does not mean that a wallet received or answered the request.
-  Future<bool> publishAcknowledged({
-    required String topic,
-    required String message,
-    required PublishOptions options,
-  });
-}
-
-/// Optional relay capability for cancellation at the actual transport boundary.
-/// Existing custom relay implementations remain source-compatible.
+/// A relay that can stop a request before its transport send starts. It calls
+/// [RequestPublicationController.beginSend] right before that send and
+/// rethrows only failures from before it. Kept apart from [IRelayClient] so
+/// existing relay implementations still compile.
 abstract interface class ICancellableRelayClient {
-  Future<bool> publishCancellable({
+  Future<void> publishCancellable({
     required String topic,
     required String message,
     required PublishOptions options,

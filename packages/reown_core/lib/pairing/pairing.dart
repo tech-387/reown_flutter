@@ -29,13 +29,15 @@ class PendingRequestResponse {
   Completer completer;
   String topic;
   String method;
-  final RequestPublicationController? publication;
+  dynamic response;
+  JsonRpcError? error;
 
   PendingRequestResponse({
     required this.completer,
     required this.topic,
     required this.method,
-    this.publication,
+    this.response,
+    this.error,
   });
 }
 
@@ -57,19 +59,8 @@ class Pairing implements IPairing {
   @override
   final Event<PairingEvent> onPairingExpire = Event<PairingEvent>();
 
-  /// Emits after the relay acknowledges a relay-mode [sendRequest].
-  ///
-  /// It does not emit for Link Mode and does not mean the wallet responded.
-  @override
-  final Event<RelayRequestPublishedEvent> onRelayRequestPublished = Event();
-
   /// Stores all the pending requests
   Map<int, PendingRequestResponse> pendingRequests = {};
-
-  final Set<int> _publicationOnlyRequests = {};
-  final Map<String, Completer<void>> _pendingResponseWaiters = {};
-  final Set<String> _retiringResponseTopics = {};
-  Future<void> Function(String topic)? _cleanupCallback;
 
   final IReownCore core;
   final IPairingStore pairings;
@@ -86,15 +77,6 @@ class Pairing implements IPairing {
     required this.history,
     required this.topicToReceiverPublicKey,
   });
-
-  /// Registers the protocol owner independently of public event subscribers.
-  /// One Sign engine owns a Core's protocol routes and pairing cleanup.
-  void registerCleanup(Future<void> Function(String topic) cleanup) {
-    if (_cleanupCallback != null && _cleanupCallback != cleanup) {
-      throw StateError('Pairing cleanup already has a protocol owner.');
-    }
-    _cleanupCallback = cleanup;
-  }
 
   @override
   Future<void> init() async {
@@ -238,7 +220,6 @@ class Pairing implements IPairing {
   @override
   Future<void> activate({required String topic}) async {
     _checkInitialized();
-    _checkPairingNotRetired(topic);
     final int expiry = ReownCoreUtils.calculateExpiry(
       ReownConstants.THIRTY_DAYS,
     );
@@ -248,16 +229,8 @@ class Pairing implements IPairing {
       PairingActivateEvent(topic: topic, expiry: expiry),
     );
 
-    try {
-      await pairings.update(topic, expiry: expiry, active: true);
-      _checkPairingNotRetired(topic);
-      await core.expirer.set(topic, expiry);
-      _checkPairingNotRetired(topic);
-    } finally {
-      if (_retiringResponseTopics.contains(topic)) {
-        await _deletePairing(topic, false);
-      }
-    }
+    await pairings.update(topic, expiry: expiry, active: true);
+    await core.expirer.set(topic, expiry);
   }
 
   @override
@@ -330,15 +303,12 @@ class Pairing implements IPairing {
 
   @override
   List<PairingInfo> getPairings() {
-    return pairings
-        .getAll()
-        .where((pairing) => !_retiringResponseTopics.contains(pairing.topic))
-        .toList();
+    return pairings.getAll();
   }
 
   @override
   PairingInfo? getPairing({required String topic}) {
-    return _retiringResponseTopics.contains(topic) ? null : pairings.get(topic);
+    return pairings.get(topic);
   }
 
   @override
@@ -363,10 +333,20 @@ class Pairing implements IPairing {
 
     core.logger.i('[$runtimeType] disconnect $topic');
 
-    final retry = _retiringResponseTopics.contains(topic);
-    if (!retry) await _isValidDisconnect(topic);
-    if (pairings.has(topic) || retry) {
-      await _deletePairing(topic, false, notifyPeer: !retry);
+    await _isValidDisconnect(topic);
+    if (pairings.has(topic)) {
+      // Send the request to delete the pairing, we don't care if it fails
+      try {
+        sendRequest(
+          topic,
+          MethodConstants.WC_PAIRING_DELETE,
+          Errors.getSdkError(Errors.USER_DISCONNECTED).toJson(),
+        );
+      } catch (_) {}
+
+      // Delete the pairing
+      await pairings.delete(topic);
+
       onPairingDelete.broadcast(PairingEvent(topic: topic));
     }
   }
@@ -378,7 +358,7 @@ class Pairing implements IPairing {
 
   @override
   Future<void> isValidPairingTopic({required String topic}) async {
-    if (!pairings.has(topic) || _retiringResponseTopics.contains(topic)) {
+    if (!pairings.has(topic)) {
       throw Errors.getInternalError(
         Errors.NO_MATCHING_KEY,
         context: "pairing topic doesn't exist: $topic",
@@ -408,16 +388,14 @@ class Pairing implements IPairing {
     TVFData? tvf,
     RequestPublicationController? publication,
   }) async {
-    publication?.throwIfCancelled();
     final payload = JsonRpcUtils.formatJsonRpcRequest(method, params, id: id);
     final requestId = payload['id'] as int;
 
     final isLinkMode = (appLink ?? '').isNotEmpty;
-    if (publication != null &&
-        (isLinkMode || core.relayClient is! ICancellableRelayClient)) {
+    if (publication != null && isLinkMode) {
       throw const ReownCoreError(
         code: -1,
-        message: 'Transport does not support cancellable relay publication.',
+        message: 'Link Mode cannot stop a request before sending it.',
       );
     }
 
@@ -429,19 +407,15 @@ class Pairing implements IPairing {
           : encodeOptions,
     );
 
-    publication?.throwIfCancelled();
-
     if (message == null) {
       return;
     }
 
     // print('adding payload to pending requests: $requestId');
-    final resp = _registerPendingResponse(
+    final resp = PendingRequestResponse(
+      completer: Completer(),
       topic: topic,
-      requestId: requestId,
       method: method,
-      reuseExact: false,
-      publication: publication,
     );
     resp.completer.future.catchError(
       (err) => core.events.recordEvent(
@@ -451,389 +425,82 @@ class Pairing implements IPairing {
         ),
       ),
     );
+    pendingRequests[requestId] = resp;
 
-    Future<void> publish() async {
-      if (isLinkMode) {
-        // during wc_sessionAuthenticate we don't need to openURL as it will be done by the host dapp
-        if (openUrl) {
-          final redirectURL = ReownCoreUtils.getLinkModeURL(
-            appLink!,
-            topic,
-            message,
-          );
-          await ReownCoreUtils.openURL(redirectURL);
-        }
-        // Send Event through Events SDK
-        core.events.recordEvent(
-          LinkModeRequestEvent(
-            direction: 'sent',
-            correlationId: requestId,
-            method: method,
-          ),
+    if (isLinkMode) {
+      // during wc_sessionAuthenticate we don't need to openURL as it will be done by the host dapp
+      if (openUrl) {
+        final redirectURL = ReownCoreUtils.getLinkModeURL(
+          appLink!,
+          topic,
+          message,
         );
-        core.logger.d(
-          '[$runtimeType] sendRequest linkMode ($appLink), '
-          'id: $requestId topic: $topic, method: $method, '
-          'params: $params, ttl: $ttl',
-        );
-      } else {
-        RpcOptions opts = MethodConstants.RPC_OPTS[method]!['req']!;
-        if (ttl != null) {
-          opts = opts.copyWith(ttl: ttl);
-        }
-
-        final publishOptions = PublishOptions(
-          ttl: ttl ?? opts.ttl,
-          tag: opts.tag,
+        await ReownCoreUtils.openURL(redirectURL);
+      }
+      // Send Event through Events SDK
+      core.events.recordEvent(
+        LinkModeRequestEvent(
+          direction: 'sent',
           correlationId: requestId,
-          // tvf data is sent only on tvfMethods methods
-          tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
-        );
-        final relayClient = core.relayClient;
-        if (publication != null || relayClient is IAcknowledgedRelayClient) {
-          late final bool published;
-          try {
-            published = publication == null
-                ? await (relayClient as IAcknowledgedRelayClient)
-                      .publishAcknowledged(
-                        topic: topic,
-                        message: message,
-                        options: publishOptions,
-                      )
-                : await (relayClient as ICancellableRelayClient)
-                      .publishCancellable(
-                        topic: topic,
-                        message: message,
-                        options: publishOptions,
-                        publication: publication,
-                      );
-          } catch (error, stackTrace) {
-            if (publication?.hasStarted == true) {
-              core.logger.e(
-                '[$runtimeType] publication uncertain; retaining exact response',
-                error: error,
-                stackTrace: stackTrace,
-              );
-              return;
-            }
-            _removePendingResponse(requestId, resp);
-            rethrow;
-          }
-          if (!published && publication?.hasStarted != true) {
-            _removePendingResponse(requestId, resp);
-            throw const ReownCoreError(
-              code: -1,
-              message: 'Relay publication was not acknowledged.',
-            );
-          }
-
-          // Listener code must not make an already-published request fail.
-          try {
-            if (published) {
-              onRelayRequestPublished.broadcast(
-                RelayRequestPublishedEvent(
-                  requestId: requestId,
-                  topic: topic,
-                  method: method,
-                ),
-              );
-            }
-          } catch (error, stackTrace) {
-            core.logger.e(
-              '[$runtimeType] onRelayRequestPublished listener failed',
-              error: error,
-              stackTrace: stackTrace,
-            );
-          }
-        } else {
-          // Custom legacy relay clients cannot report a positive relay ACK.
-          await relayClient.publish(
-            topic: topic,
-            message: message,
-            options: publishOptions,
-          );
-        }
-        core.logger.d(
-          '[$runtimeType] sendRequest relayClient, '
-          'id: $requestId topic: $topic, method: $method, '
-          'params: $params, ttl: ${ttl ?? opts.ttl}',
-        );
-      }
-    }
-
-    if (publication == null) {
-      await publish();
-    } else {
-      // A controlled request can finish before its relay ACK. Keep the losing
-      // publication future observed without changing legacy/Link Mode ordering.
-      await Future.any<void>([
-        publish(),
-        resp.completer.future.then<void>((_) {}),
-      ]);
-    }
-
-    // Await the original waiter, including pre-send retirement cancellation.
-    return await resp.completer.future;
-  }
-
-  @override
-  Future<void> publishRequestAcknowledged(
-    String topic,
-    String method,
-    Map<String, dynamic> params,
-  ) async {
-    late int requestId;
-    do {
-      requestId = JsonRpcUtils.payloadId();
-    } while (pendingRequests.containsKey(requestId) ||
-        _publicationOnlyRequests.contains(requestId));
-    _publicationOnlyRequests.add(requestId);
-    final publication = RequestPublicationController(
-      expiryTimestamp: DateTime.now().millisecondsSinceEpoch ~/ 1000 + 5,
-    );
-
-    Future<void> publish() async {
-      final payload = JsonRpcUtils.formatJsonRpcRequest(
-        method,
-        params,
-        id: requestId,
+          method: method,
+        ),
       );
-      final message = await core.crypto.encode(topic, payload);
-      publication.throwIfCancelled();
-      if (message == null) {
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Failed to encode relay request.',
-        );
-      }
-
-      final opts = MethodConstants.RPC_OPTS[method]!['req']!;
-      final relayClient = core.relayClient;
-      if (relayClient is! IAcknowledgedRelayClient) {
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Relay client cannot acknowledge request publication.',
-        );
+      core.logger.d(
+        '[$runtimeType] sendRequest linkMode ($appLink), '
+        'id: $requestId topic: $topic, method: $method, '
+        'params: $params, ttl: $ttl',
+      );
+    } else {
+      RpcOptions opts = MethodConstants.RPC_OPTS[method]!['req']!;
+      if (ttl != null) {
+        opts = opts.copyWith(ttl: ttl);
       }
       final options = PublishOptions(
-        ttl: opts.ttl,
+        ttl: ttl ?? opts.ttl,
         tag: opts.tag,
         correlationId: requestId,
+        // tvf data is sent only on tvfMethods methods
+        tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson() : null,
       );
-      final published = relayClient is ICancellableRelayClient
-          ? await (relayClient as ICancellableRelayClient).publishCancellable(
-              topic: topic,
-              message: message,
-              options: options,
-              publication: publication,
-            )
-          : await (relayClient as IAcknowledgedRelayClient).publishAcknowledged(
-              topic: topic,
-              message: message,
-              options: options,
-            );
-      if (!published) {
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Relay request publication was not acknowledged.',
+      if (publication == null) {
+        await core.relayClient.publish(
+          topic: topic,
+          message: message,
+          options: options,
+        );
+      } else {
+        await _publishControlled(
+          requestId,
+          publication,
+          (relay) => relay.publishCancellable(
+            topic: topic,
+            message: message,
+            options: options,
+            publication: publication,
+          ),
         );
       }
+      core.logger.d(
+        '[$runtimeType] sendRequest relayClient, '
+        'id: $requestId topic: $topic, method: $method, '
+        'params: $params, ttl: ${ttl ?? opts.ttl}',
+      );
     }
 
+    // Get the result from the completer, if it's an error, throw it
     try {
-      // One budget covers encoding, relay preparation and acknowledgement.
-      // timeout observes late completion; the controller prevents a delayed
-      // encoder/reconnect from publishing after local cleanup has continued.
-      await publish().timeout(const Duration(seconds: 5));
-    } finally {
-      publication.cancel();
-      _publicationOnlyRequests.remove(requestId);
-    }
-  }
-
-  PendingRequestResponse _registerPendingResponse({
-    required String topic,
-    required int requestId,
-    required String method,
-    required bool reuseExact,
-    RequestPublicationController? publication,
-  }) {
-    if (_publicationOnlyRequests.contains(requestId)) {
-      throw ReownCoreError(
-        code: -1,
-        message: 'Request identity conflict for request $requestId.',
-      );
-    }
-    final existing = pendingRequests[requestId];
-    if (existing != null) {
-      if (reuseExact && existing.topic == topic && existing.method == method) {
-        return existing;
+      if (resp.error != null) {
+        throw resp.error!;
       }
-      throw ReownCoreError(
-        code: -1,
-        message: 'Pending response identity conflict for request $requestId.',
-      );
-    }
 
-    if (_retiringResponseTopics.contains(topic)) {
-      throw const ReownCoreError(
-        code: -1,
-        message: 'Response topic teardown has already started.',
-      );
-    }
-
-    final pending = PendingRequestResponse(
-      completer: Completer(),
-      topic: topic,
-      method: method,
-      publication: publication,
-    );
-    pendingRequests[requestId] = pending;
-    return pending;
-  }
-
-  @override
-  Future<dynamic> restorePendingResponse({
-    required String topic,
-    required int requestId,
-    required String method,
-  }) {
-    return _registerPendingResponse(
-      topic: topic,
-      requestId: requestId,
-      method: method,
-      reuseExact: true,
-    ).completer.future;
-  }
-
-  @override
-  bool hasPendingResponse({required String topic}) =>
-      pendingRequests.values.any((request) => request.topic == topic);
-
-  /// Whether local retirement has permanently revoked new use of [topic].
-  bool isResponseTopicRetired({required String topic}) =>
-      _retiringResponseTopics.contains(topic);
-
-  @override
-  Future<void> waitForPendingResponses({required String topic}) {
-    if (!hasPendingResponse(topic: topic)) return Future.value();
-    return _pendingResponseWaiters
-        .putIfAbsent(topic, Completer<void>.new)
-        .future;
-  }
-
-  @override
-  bool tryBeginResponseTopicTeardown({required String topic}) {
-    _retiringResponseTopics.add(topic);
-    // A registered waiter does not prove publication. Reuse the transport's
-    // existing send boundary to cancel only requests that are still unsent.
-    for (final entry in pendingRequests.entries.toList()) {
-      final pending = entry.value;
-      if (pending.topic == topic && pending.publication?.cancel() == true) {
-        if (!pending.completer.isCompleted) {
-          pending.completer.completeError(const RequestPublicationCancelled());
-        }
-        _removePendingResponse(entry.key, pending);
+      // print('checking if completed');
+      if (resp.completer.isCompleted) {
+        return resp.response;
       }
-    }
-    return !hasPendingResponse(topic: topic);
-  }
 
-  @override
-  Future<List<Map<String, dynamic>>> getDecodedMessageHistory({
-    required String topic,
-  }) async {
-    final relay = core.relayClient;
-    if (relay is! RelayClient) {
-      throw const ReownCoreError(
-        code: -1,
-        message: 'Relay message history is unavailable.',
-      );
-    }
-
-    await core.storage.init();
-    await core.secureStorage.init();
-    await core.crypto.init();
-    await relay.messageTracker.init();
-
-    final messages = List<String>.of(
-      relay.messageTracker.get(topic)?.values ?? const <String>[],
-      growable: false,
-    );
-    final history = <Map<String, dynamic>>[];
-    for (final message in messages) {
-      try {
-        final payload = await core.crypto.decode(topic, message);
-        if (payload == null) {
-          core.logger.e(
-            '[$runtimeType] recorded message decryption returned no payload',
-          );
-          continue;
-        }
-        final decoded = jsonDecode(payload);
-        if (decoded is Map) {
-          history.add(Map<String, dynamic>.from(decoded));
-        }
-      } catch (error, stackTrace) {
-        core.logger.e(
-          '[$runtimeType] failed to decode recorded message',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }
-    }
-    return List.unmodifiable(history);
-  }
-
-  @override
-  bool isTerminalPendingResponseError(JsonRpcError error) {
-    final code = error.code;
-    final message = error.message;
-    // MetaMask may wrap a provider error in one bounded JSON envelope. Only
-    // classify its structured code; keep the original error and response wait.
-    if (code == 5000 && message != null && message.length <= 4096) {
-      try {
-        final nested = jsonDecode(message);
-        if (nested is Map<String, dynamic> &&
-            nested['code'] is int &&
-            nested['message'] is String) {
-          return nested['code'] != 1 && nested['code'] != -32002;
-        }
-      } on FormatException {
-        // Plain text and malformed envelopes retain their outer error code.
-      }
-    }
-    return code != 1 && code != -32002;
-  }
-
-  @override
-  bool forgetPendingResponse({
-    required String topic,
-    required int requestId,
-    required String method,
-  }) {
-    final existing = pendingRequests[requestId];
-    if (existing == null ||
-        existing.topic != topic ||
-        existing.method != method) {
-      return false;
-    }
-    _removePendingResponse(requestId, existing);
-    if (!existing.completer.isCompleted) {
-      existing.completer.completeError(
-        StateError('Pending response was released locally.'),
-      );
-    }
-    return true;
-  }
-
-  void _removePendingResponse(int requestId, PendingRequestResponse pending) {
-    // A cancelled publication can finish after another topic reuses its ID.
-    if (!identical(pendingRequests[requestId], pending)) return;
-    pendingRequests.remove(requestId);
-    if (!hasPendingResponse(topic: pending.topic)) {
-      final waiter = _pendingResponseWaiters.remove(pending.topic);
-      if (waiter != null && !waiter.isCompleted) waiter.complete();
+      return await resp.completer.future;
+    } catch (e) {
+      rethrow;
     }
   }
 
@@ -850,13 +517,6 @@ class Pairing implements IPairing {
     EncodeOptions? encodeOptions,
     RequestPublicationController? publication,
   }) async {
-    publication?.throwIfCancelled();
-    if (publication != null && core.relayClient is! ICancellableRelayClient) {
-      throw const ReownCoreError(
-        code: -1,
-        message: 'Transport does not support cancellable relay publication.',
-      );
-    }
     final proposeSessionPayload = JsonRpcUtils.formatJsonRpcRequest(
       MethodConstants.WC_SESSION_PROPOSE,
       params,
@@ -870,19 +530,15 @@ class Pairing implements IPairing {
       options: encodeOptions,
     );
 
-    publication?.throwIfCancelled();
-
     if (proposeSessionMessage == null) {
       return;
     }
 
     // print('adding payload to pending requests: $requestId');
-    final resp = _registerPendingResponse(
+    final resp = PendingRequestResponse(
+      completer: Completer(),
       topic: topic,
-      requestId: requestId,
       method: MethodConstants.WC_SESSION_PROPOSE,
-      reuseExact: false,
-      publication: publication,
     );
     resp.completer.future.catchError(
       (err) => core.events.recordEvent(
@@ -892,6 +548,7 @@ class Pairing implements IPairing {
         ),
       ),
     );
+    pendingRequests[requestId] = resp;
 
     final payload = {
       'pairingTopic': topic,
@@ -904,50 +561,70 @@ class Pairing implements IPairing {
       publishMethod: RelayClient.WC_PROPOSE_SESSION,
     );
 
-    Future<void> publish() async {
-      try {
-        if (publication == null) {
-          await core.relayClient.publishPayload(
-            payload: payload,
-            options: options,
-          );
-        } else {
-          await (core.relayClient as ICancellableRelayClient)
-              .publishPayloadCancellable(
-                payload: payload,
-                options: options,
-                publication: publication,
-              );
-        }
-      } catch (error, stackTrace) {
-        if (publication == null || !publication.hasStarted) {
-          if (publication != null) _removePendingResponse(requestId, resp);
-          rethrow;
-        }
-        core.logger.e(
-          '[$runtimeType] proposal publication uncertain; retaining exact response',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }
-      core.logger.d(
-        '[$runtimeType] sendProposeSessionRequest relayClient, '
-        'payload: ${jsonEncode(payload)}, options: ${jsonEncode(options.toJson())}',
+    if (publication == null) {
+      await core.relayClient.publishPayload(payload: payload, options: options);
+    } else {
+      await _publishControlled(
+        requestId,
+        publication,
+        (relay) => relay.publishPayloadCancellable(
+          payload: payload,
+          options: options,
+          publication: publication,
+        ),
       );
     }
+    core.logger.d(
+      '[$runtimeType] sendProposeSessionRequest relayClient, '
+      'payload: ${jsonEncode(payload)}, options: ${jsonEncode(options.toJson())}',
+    );
 
-    if (publication == null) {
-      await publish();
-    } else {
-      // Only controlled proposals opt into response-before-ACK completion.
-      await Future.any<void>([
-        publish(),
-        resp.completer.future.then<void>((_) {}),
-      ]);
+    // Get the result from the completer, if it's an error, throw it
+    try {
+      if (resp.error != null) {
+        throw resp.error!;
+      }
+
+      // print('checking if completed');
+      if (resp.completer.isCompleted) {
+        return resp.response;
+      }
+
+      return await resp.completer.future;
+    } catch (e) {
+      rethrow;
     }
+  }
 
-    // Await the original waiter, including pre-send retirement cancellation.
-    return await resp.completer.future;
+  /// Publishes through a relay that can stop the request before its send. A
+  /// send that never started can't be answered, so its waiter is removed and
+  /// the error rethrown. After the send started, the caller keeps waiting.
+  Future<void> _publishControlled(
+    int requestId,
+    RequestPublicationController publication,
+    Future<void> Function(ICancellableRelayClient relay) publish,
+  ) async {
+    try {
+      if (core.relayClient case final ICancellableRelayClient relay) {
+        await publish(relay);
+        // The relay returns without sending when it has no connection.
+        if (!publication.hasStarted) {
+          throw const ReownCoreError(
+            code: -1,
+            message: 'Relay is not connected; the request was not sent.',
+          );
+        }
+      } else {
+        throw const ReownCoreError(
+          code: -1,
+          message: 'Relay cannot stop a request before sending it.',
+        );
+      }
+    } catch (_) {
+      if (publication.hasStarted) return;
+      pendingRequests.remove(requestId);
+      rethrow;
+    }
   }
 
   @override
@@ -974,11 +651,7 @@ class Pairing implements IPairing {
     );
 
     if (message == null) {
-      if (method != MethodConstants.WC_SESSION_EVENT) return;
-      throw const ReownCoreError(
-        code: -1,
-        message: 'Failed to encode relay response.',
-      );
+      return;
     }
 
     if (isLinkMode) {
@@ -1003,7 +676,7 @@ class Pairing implements IPairing {
     } else {
       final opts = MethodConstants.RPC_OPTS[method]!['res']!;
       //
-      await _publishRelayResponse(
+      await core.relayClient.publish(
         topic: topic,
         message: message,
         options: PublishOptions(
@@ -1013,7 +686,6 @@ class Pairing implements IPairing {
           // tvf data is sent only on tvfMethods methods
           tvf: _shouldSendTVF(opts.tag) ? tvf?.toJson(includeAll: true) : null,
         ),
-        requireAcknowledgement: method == MethodConstants.WC_SESSION_EVENT,
       );
       core.logger.d(
         '[$runtimeType] sendResult relayClient, '
@@ -1124,11 +796,7 @@ class Pairing implements IPairing {
     );
 
     if (message == null) {
-      if (method != MethodConstants.WC_SESSION_EVENT) return;
-      throw const ReownCoreError(
-        code: -1,
-        message: 'Failed to encode relay error response.',
-      );
+      return;
     }
 
     if (isLinkMode) {
@@ -1160,7 +828,7 @@ class Pairing implements IPairing {
       final ttl = (rpcOptions ?? fallbackOpts).ttl;
       final tag = (rpcOptions ?? fallbackOpts).tag;
       //
-      await _publishRelayResponse(
+      await core.relayClient.publish(
         topic: topic,
         message: message,
         options: PublishOptions(
@@ -1170,7 +838,6 @@ class Pairing implements IPairing {
           // tvf data is sent only on tvfMethods methods
           tvf: _shouldSendTVF(tag) ? tvf?.toJson(includeAll: true) : null,
         ),
-        requireAcknowledgement: method == MethodConstants.WC_SESSION_EVENT,
       );
       core.logger.d(
         '[$runtimeType] sendError relayClient, '
@@ -1181,12 +848,6 @@ class Pairing implements IPairing {
 
   /// ---- Private Helpers ---- ///
 
-  void _checkPairingNotRetired(String topic) {
-    if (_retiringResponseTopics.contains(topic)) {
-      throw Errors.getSdkError(Errors.USER_DISCONNECTED);
-    }
-  }
-
   Future<void> _resubscribeAll() async {
     // If the relay is not active, stop here
     if (!core.relayClient.isConnected) {
@@ -1195,111 +856,31 @@ class Pairing implements IPairing {
 
     // Resubscribe to all active pairings
     for (final PairingInfo pairing in pairings.getAll()) {
-      if (_retiringResponseTopics.contains(pairing.topic) &&
-          !hasPendingResponse(topic: pairing.topic)) {
-        continue;
-      }
       core.logger.i('[$runtimeType] Resubscribe to pairing: ${pairing.topic}');
-      try {
-        await core.relayClient.subscribe(
-          options: SubscribeOptions(topic: pairing.topic),
-        );
-      } finally {
-        if (_retiringResponseTopics.contains(pairing.topic) &&
-            !hasPendingResponse(topic: pairing.topic)) {
-          try {
-            await _deletePairing(pairing.topic, false);
-          } catch (error, stackTrace) {
-            // A retired topic's failed disposal must not skip the remaining
-            // pairings' subscriptions on this connection.
-            core.logger.e(
-              '[$runtimeType] late pairing resubscription cleanup failed',
-              error: error,
-              stackTrace: stackTrace,
-            );
-          }
-        }
-      }
+      await core.relayClient.subscribe(
+        options: SubscribeOptions(topic: pairing.topic),
+      );
     }
   }
 
-  Future<void> _deletePairing(
-    String topic,
-    bool expirerHasDeleted, {
-    bool notifyPeer = false,
-  }) async {
+  Future<void> _deletePairing(String topic, bool expirerHasDeleted) async {
     core.logger.d('[$runtimeType] _deletePairing $topic, $expirerHasDeleted');
-    tryBeginResponseTopicTeardown(topic: topic);
-    Object? failure;
-    StackTrace? failureTrace;
-    Future<void> cleanup(Future<void> Function() step) async {
-      try {
-        await step();
-      } catch (error, stackTrace) {
-        failure ??= error;
-        failureTrace ??= stackTrace;
-        core.logger.e(
-          '[$runtimeType] pairing cleanup failed for $topic',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }
+    await core.relayClient.unsubscribe(topic: topic);
+    await pairings.delete(topic);
+    await core.crypto.deleteSymKey(topic);
+    if (expirerHasDeleted) {
+      await core.expirer.delete(topic);
     }
-
-    await cleanup(() async => await _cleanupCallback?.call(topic));
-    if (notifyPeer &&
-        core.connectivity.isOnline.value &&
-        core.relayClient.isConnected) {
-      // Notification is best effort and bounded. No wallet response waiter is
-      // created; a relay ACK never proves wallet acknowledgement.
-      try {
-        await publishRequestAcknowledged(
-          topic,
-          MethodConstants.WC_PAIRING_DELETE,
-          Errors.getSdkError(Errors.USER_DISCONNECTED).toJson(),
-        );
-      } catch (error, stackTrace) {
-        core.logger.e(
-          '[$runtimeType] pairing delete notification failed for $topic',
-          error: error,
-          stackTrace: stackTrace,
-        );
-      }
-    }
-    final canDeleteKeys = tryBeginResponseTopicTeardown(topic: topic);
-    if (!canDeleteKeys) {
-      // Only the original topic's response keys and subscription remain owned.
-      waitForPendingResponses(topic: topic)
-          .then((_) => _deletePairing(topic, expirerHasDeleted))
-          .catchError((Object error, StackTrace stackTrace) {
-            core.logger.e(
-              '[$runtimeType] deferred pairing cleanup failed for $topic',
-              error: error,
-              stackTrace: stackTrace,
-            );
-          });
-    }
-    if (canDeleteKeys) {
-      // Run shared-store mutations in order; competing snapshots can resurrect
-      // keys. Observe each failure and still attempt the remaining owned work.
-      await cleanup(() => core.relayClient.unsubscribe(topic: topic));
-      await cleanup(() => core.crypto.deleteSymKey(topic));
-      await cleanup(() => topicToReceiverPublicKey.delete(topic));
-    }
-    if (!expirerHasDeleted) await cleanup(() => core.expirer.delete(topic));
-    if (failure != null) Error.throwWithStackTrace(failure!, failureTrace!);
-    if (canDeleteKeys) await pairings.delete(topic);
   }
 
   Future<void> _cleanup() async {
     core.logger.d('[$runtimeType] _cleanup');
-    final List<PairingInfo> expiredPairings = pairings
-        .getAll()
+    final List<PairingInfo> expiredPairings = getPairings()
         .where((PairingInfo info) => ReownCoreUtils.isExpired(info.expiry))
         .toList();
     for (final PairingInfo pairing in expiredPairings) {
       // print('deleting expired pairing: ${pairing.topic}');
-      await _deletePairing(pairing.topic, false);
+      await _deletePairing(pairing.topic, true);
     }
 
     // Cleanup all history records
@@ -1355,15 +936,7 @@ class Pairing implements IPairing {
 
   Future<void> _onRelayConnectEvent(EventArgs? args) async {
     // print('Pairing: Relay connected');
-    try {
-      await _resubscribeAll();
-    } catch (error, stackTrace) {
-      core.logger.e(
-        '[$runtimeType] pairing resubscription failed',
-        error: error,
-        stackTrace: stackTrace,
-      );
-    }
+    await _resubscribeAll();
   }
 
   void _onLinkModeMessageEvent(MessageEvent? event) async {
@@ -1429,20 +1002,12 @@ class Pairing implements IPairing {
       final request = JsonRpcRequest.fromJson(data);
 
       if (routerMapRequest.containsKey(request.method)) {
-        try {
-          await routerMapRequest[request.method]!.function(
-            event.topic,
-            request,
-            event.attestation,
-            event.transportType,
-          );
-        } catch (error, stackTrace) {
-          core.logger.e(
-            '[$runtimeType] request handler failed, method: '
-            '${request.method}, errorType: ${error.runtimeType}',
-            stackTrace: stackTrace,
-          );
-        }
+        routerMapRequest[request.method]!.function(
+          event.topic,
+          request,
+          event.attestation,
+          event.transportType,
+        );
       } else {
         _onUnkownRpcMethodRequest(event.topic, request);
       }
@@ -1463,70 +1028,33 @@ class Pairing implements IPairing {
 
       if (pendingRequests.containsKey(response.id)) {
         final pendingRequest = pendingRequests[response.id]!;
-        if (pendingRequest.topic != event.topic) {
+        // Only the topic the request went out on can answer it; authentication
+        // is answered on its own response topic.
+        if (pendingRequest.topic != event.topic &&
+            pendingRequest.method != MethodConstants.WC_SESSION_AUTHENTICATE) {
           core.logger.d(
-            '[$runtimeType] ignoring response with mismatched topic for '
-            'pending request, id: ${response.id}',
+            '[$runtimeType] ignoring response from another topic for pending '
+            'request, id: ${response.id}',
           );
           return;
         }
-
-        // Some wallets (e.g. MetaMask) can publish a spurious, non-terminal
-        // error response for a request id (code 1 "Invalid Id", or -32002
-        // "already processing") while the request is still open and the
-        // real terminal response (approval/rejection) is yet to arrive.
-        // A Completer can only ever settle once, so blindly completing it
-        // here would permanently discard the real response that follows:
-        // it would find this same pendingRequests entry and try to
-        // complete the same, already-completed Completer again, which
-        // throws inside this fire-and-forget event handler and is lost
-        // with no way for any caller to observe it. Ignore these known
-        // non-terminal codes and keep the entry around for the response
-        // that actually settles the request.
-        if (response.error != null &&
-            // JsonRpcError narrows numeric codes to int. Fractional wire codes
-            // must not acquire an exception reserved for an exact pending code.
-            (!const [1, -32002, 5000].contains(response.error!.code) ||
-                data['error']['code'] == response.error!.code) &&
-            !isTerminalPendingResponseError(response.error!)) {
+        // Completing on a non-terminal error would drop the real answer that
+        // follows: a completer settles once. Keep waiting for that answer.
+        if (response.error != null && _isNonTerminalError(response.error!)) {
           core.logger.d(
             '[$runtimeType] ignoring non-terminal response for pending '
             'request, id: ${response.id}, code: ${response.error!.code}',
           );
           return;
         }
-
-        if (!pendingRequest.completer.isCompleted) {
-          if (response.error == null &&
-              pendingRequest.method == MethodConstants.WC_SESSION_PROPOSE) {
-            final pairing = getPairing(topic: event.topic);
-            if (pairing != null) {
-              // Renew before releasing the response owner. Expiry cleanup must
-              // not race Sign's subsequent shared-key/subscription awaits.
-              try {
-                await activate(topic: event.topic);
-              } catch (error, stackTrace) {
-                // PairingStore updates its in-memory expiry before persistence.
-                // A storage failure must not discard an already decoded reply.
-                core.logger.e(
-                  '[$runtimeType] proposal pairing activation failed',
-                  error: error,
-                  stackTrace: stackTrace,
-                );
-              }
-              if (pendingRequest.completer.isCompleted ||
-                  !identical(pendingRequests[response.id], pendingRequest)) {
-                return;
-              }
-            }
-          }
-          if (response.error != null) {
-            pendingRequest.completer.completeError(response.error!);
-          } else {
-            pendingRequest.completer.complete(response.result);
-          }
+        pendingRequests.remove(response.id);
+        if (response.error != null) {
+          pendingRequest.error = response.error;
+          pendingRequest.completer.completeError(response.error!);
+        } else {
+          pendingRequest.response = response.result;
+          pendingRequest.completer.complete(response.result);
         }
-        _removePendingResponse(response.id, pendingRequest);
 
         if (isLinkMode) {
           // Send Event through Events SDK
@@ -1546,43 +1074,34 @@ class Pairing implements IPairing {
     }
   }
 
+  /// Errors some wallets (e.g. MetaMask) send for a request they still hold,
+  /// before its real answer: code 1 ("Invalid Id") and -32002 ("already
+  /// processing"), also wrapped as one JSON error in a 5000 error's message.
+  bool _isNonTerminalError(JsonRpcError error) {
+    var code = error.code;
+    final message = error.message;
+    // Decode only a bounded message, and only a complete {code, message} error.
+    if (code == 5000 && message != null && message.length <= 4096) {
+      try {
+        final wrapped = jsonDecode(message);
+        if (wrapped is Map &&
+            wrapped['code'] is int &&
+            wrapped['message'] is String) {
+          code = wrapped['code'] as int;
+        }
+      } on FormatException {
+        // A plain-text message keeps the outer code.
+      }
+    }
+    return code == 1 || code == -32002;
+  }
+
   bool _isSessionAuthRejectedError(String method, JsonRpcError? error) {
     final errorCode = error?.code ?? 0;
     final sessionRejected =
         method == MethodConstants.WC_SESSION_AUTHENTICATE &&
         (errorCode == 12001 || (errorCode >= 5000 && errorCode <= 5003));
     return sessionRejected;
-  }
-
-  Future<void> _publishRelayResponse({
-    required String topic,
-    required String message,
-    required PublishOptions options,
-    required bool requireAcknowledgement,
-  }) async {
-    final relayClient = core.relayClient;
-    if (requireAcknowledgement) {
-      if (relayClient is! IAcknowledgedRelayClient) {
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Relay client cannot acknowledge response publication.',
-        );
-      }
-      final acknowledgedRelayClient = relayClient as IAcknowledgedRelayClient;
-      final published = await acknowledgedRelayClient.publishAcknowledged(
-        topic: topic,
-        message: message,
-        options: options,
-      );
-      if (!published) {
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Relay response publication was not acknowledged.',
-        );
-      }
-      return;
-    }
-    await relayClient.publish(topic: topic, message: message, options: options);
   }
 
   Future<void> _onPairingPingRequest(
@@ -1616,7 +1135,7 @@ class Pairing implements IPairing {
     try {
       await _isValidDisconnect(topic);
       await sendResult(id, topic, request.method, true);
-      await _deletePairing(topic, false);
+      await pairings.delete(topic);
       onPairingDelete.broadcast(PairingEvent(id: id, topic: topic));
     } on JsonRpcError catch (e) {
       await sendError(id, topic, request.method, e);
@@ -1664,18 +1183,11 @@ class Pairing implements IPairing {
     }
     core.logger.d('[$runtimeType] _onExpired, ${event.toString()}');
 
-    while (true) {
-      final pairing = pairings.get(event.target);
-      if (pairing == null || !ReownCoreUtils.isExpired(pairing.expiry)) return;
-      if (!hasPendingResponse(topic: event.target)) break;
-
-      // The pairing key/subscription still belongs to an outgoing response.
-      // Natural expiry must not retire a pairing that its response can renew.
-      // Recheck expiry after settlement: an accepted proposal renews pairing.
-      await waitForPendingResponses(topic: event.target);
+    if (pairings.has(event.target)) {
+      // Clean up the pairing
+      await _deletePairing(event.target, true);
+      onPairingExpire.broadcast(PairingEvent(topic: event.target));
     }
-    await _deletePairing(event.target, true);
-    onPairingExpire.broadcast(PairingEvent(topic: event.target));
   }
 
   void _heartbeatSubscription(EventArgs? args) async {

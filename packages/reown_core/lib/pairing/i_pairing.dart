@@ -16,12 +16,6 @@ abstract class IPairing {
   abstract final Event<PairingEvent> onPairingDelete;
   abstract final Event<PairingEvent> onPairingExpire;
 
-  /// Emits after the relay acknowledges a relay-mode [sendRequest].
-  ///
-  /// This does not mean the wallet received or answered the request. Link Mode
-  /// requests do not emit this event.
-  abstract final Event<RelayRequestPublishedEvent> onRelayRequestPublished;
-
   Future<void> init();
   Future<PairingInfo> pair({required Uri uri, bool activatePairing});
   Future<CreateResponse> create({
@@ -49,13 +43,6 @@ abstract class IPairing {
   List<PairingInfo> getPairings();
   PairingInfo? getPairing({required String topic});
   Future<void> ping({required String topic});
-
-  /// Retires the local pairing, its Sign sessions and connection proposals.
-  /// Notification failures are logged, not returned as local cleanup failures.
-  /// Completion does not imply peer acknowledgement. Keys/subscriptions needed
-  /// by existing response waiters are retained until those waiters settle.
-  /// Pending local session proposals fail with USER_DISCONNECTED.
-  /// Retired topics cannot authorize new work in this runtime.
   Future<void> disconnect({required String topic});
   IPairingStore getStore();
 
@@ -70,63 +57,6 @@ abstract class IPairing {
     bool openUrl = true,
     TVFData? tvf,
     RequestPublicationController? publication,
-  });
-
-  /// Publishes a relay request and waits for positive relay acknowledgement.
-  ///
-  /// This does not register or await a response.
-  /// Encoding and relay acknowledgement share a five-second deadline. The
-  /// built-in relay also prevents a send from starting after that deadline;
-  /// custom acknowledgement-only relays retain their own send lifecycle.
-  Future<void> publishRequestAcknowledged(
-    String topic,
-    String method,
-    Map<String, dynamic> params,
-  );
-
-  /// Restores the response waiter for an already-published request.
-  ///
-  /// This never publishes a request. Calling it repeatedly for the same topic,
-  /// request ID, and method returns the same response future. A conflicting
-  /// request identity throws instead of attaching to the wrong response.
-  Future<dynamic> restorePendingResponse({
-    required String topic,
-    required int requestId,
-    required String method,
-  });
-
-  /// Whether [topic] still owns at least one exact pending response.
-  bool hasPendingResponse({required String topic});
-
-  /// Completes when every exact pending response for [topic] is terminal.
-  Future<void> waitForPendingResponses({required String topic});
-
-  /// Revokes new publication and cancels registered requests still unsent.
-  /// Returns whether no original pending response still needs [topic].
-  /// Existing sent waiters remain restorable; new waiters cannot be registered.
-  bool tryBeginResponseTopicTeardown({required String topic});
-
-  /// Returns valid JSON-RPC envelopes recorded for [topic].
-  ///
-  /// Storage access and decryption stay inside Reown. Invalid or undecryptable
-  /// history entries are logged and omitted without blocking valid entries.
-  Future<List<Map<String, dynamic>>> getDecodedMessageHistory({
-    required String topic,
-  });
-
-  /// Whether a peer error proves that its pending request has settled.
-  bool isTerminalPendingResponseError(JsonRpcError error);
-
-  /// Removes only the pending response waiter matching the exact request.
-  ///
-  /// This does not cancel or publish anything. It is intended for callers that
-  /// have independently ended observation of the original request. Its pending
-  /// future completes with a local [StateError]; this is not a wallet rejection
-  /// or proof that a submitted transaction was cancelled.
-  bool forgetPendingResponse({
-    required String topic,
-    required int requestId,
-    required String method,
   });
 
   Future<dynamic> sendProposeSessionRequest(

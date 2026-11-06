@@ -95,6 +95,7 @@ class SignClientTestWrapper implements IReownSign {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods = ReownSign.DEFAULT_METHODS,
+    // Not forwarded: IReownSignClient has no publication or request ID.
     RequestPublicationController? publication,
     int? requestId,
   }) async {
@@ -107,8 +108,6 @@ class SignClientTestWrapper implements IReownSign {
         relays: relays,
         authentication: authentication,
         methods: methods,
-        publication: publication,
-        requestId: requestId,
       );
     } catch (e) {
       // print(e);
@@ -200,15 +199,14 @@ class SignClientTestWrapper implements IReownSign {
   @override
   Future<dynamic> request({
     int? requestId,
-    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
+    // Not forwarded: IReownSignClient has no publication.
+    RequestPublicationController? publication,
   }) async {
     try {
       return await client.request(
-        requestId: requestId,
-        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,

@@ -441,8 +441,6 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
     List<_i4.Relay>? relays,
     List<_i2.SessionAuthRequestParams>? authentication,
     List<List<String>>? methods,
-    _i4.RequestPublicationController? publication,
-    int? requestId,
   }) =>
       (super.noSuchMethod(
             Invocation.method(#connect, [], {
@@ -453,8 +451,6 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
               #relays: relays,
               #authentication: authentication,
               #methods: methods,
-              #publication: publication,
-              #requestId: requestId,
             }),
             returnValue: _i21.Future<_i2.ConnectResponse>.value(
               _FakeConnectResponse_6(
@@ -467,8 +463,6 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
                   #relays: relays,
                   #authentication: authentication,
                   #methods: methods,
-                  #publication: publication,
-                  #requestId: requestId,
                 }),
               ),
             ),
@@ -478,7 +472,6 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
   @override
   _i21.Future<dynamic> request({
     int? requestId,
-    _i4.RequestPublicationController? publication,
     required String? topic,
     required String? chainId,
     required _i2.SessionRequestParams? request,
@@ -486,7 +479,6 @@ class MockIReownAppKit extends _i1.Mock implements _i18.IReownAppKit {
       (super.noSuchMethod(
             Invocation.method(#request, [], {
               #requestId: requestId,
-              #publication: publication,
               #topic: topic,
               #chainId: chainId,
               #request: request,

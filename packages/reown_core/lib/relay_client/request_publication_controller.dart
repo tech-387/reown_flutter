@@ -1,57 +1,51 @@
 import 'dart:async';
 
-/// Owns the last cancellable boundary of one outgoing relay request.
-/// Create a fresh controller for each request.
-///
-/// Cancellation only prevents publication before the transport send starts.
-/// Neither a started send nor a relay acknowledgement proves wallet receipt,
-/// approval, or transaction submission.
+/// Controls one outgoing relay request up to its transport send: it can stop
+/// the request before the send starts, and reports the relay's acknowledgement.
+/// Neither a started send nor an acknowledgement proves that the wallet
+/// received, approved or submitted anything. Use a fresh controller per request.
 final class RequestPublicationController {
-  /// Absolute Unix timestamp in seconds after which publication must not start.
-  final int? expiryTimestamp;
-
   RequestPublicationController({this.expiryTimestamp});
+
+  /// Unix time in seconds from which the send must not start.
+  final int? expiryTimestamp;
 
   bool _cancelled = false;
   bool _started = false;
-  final Completer<void> _acknowledgement = Completer<void>();
+  final _acknowledged = Completer<void>();
 
+  /// Whether the transport send started, so the request may have been sent.
   bool get hasStarted => _started;
 
-  /// Local cancellation intent, including cancellation after publication.
-  bool get isCancellationRequested => _cancelled;
-  Future<void> get acknowledged => _acknowledgement.future;
+  /// Completes when the relay positively acknowledges the request.
+  Future<void> get acknowledged => _acknowledged.future;
 
-  /// Returns true when this request can no longer be published.
-  /// Returns false once a transport send may have made it remotely actionable.
+  /// Stops a send that has not started. Returns true when the request can no
+  /// longer be sent, false when it may already have been.
   bool cancel() {
     _cancelled = true;
     return !_started;
   }
 
-  void throwIfCancelled() {
-    if (_started) return;
+  /// Marks the send as started. Call it right before the transport send, with
+  /// no await in between. Throws when the request was cancelled or expired.
+  void beginSend() {
     if (_cancelled) throw const RequestPublicationCancelled();
     final expiry = expiryTimestamp;
     if (expiry != null &&
         DateTime.now().millisecondsSinceEpoch >= expiry * 1000) {
-      throw TimeoutException('Request expired before transport send.');
+      throw TimeoutException('Request expired before its transport send.');
     }
-  }
-
-  /// Called synchronously immediately before the transport send, without any
-  /// intervening await. Public for custom relay implementations.
-  void beginSend() {
-    throwIfCancelled();
     _started = true;
   }
 
+  /// Records the relay's positive acknowledgement.
   void acknowledge() {
-    if (!_acknowledgement.isCompleted) _acknowledgement.complete();
+    if (!_acknowledged.isCompleted) _acknowledged.complete();
   }
 }
 
-/// This request was stopped before its transport send could begin.
+/// The request was stopped before its transport send started.
 final class RequestPublicationCancelled implements Exception {
   const RequestPublicationCancelled();
 

@@ -178,8 +178,6 @@ class ReownAppKit implements IReownAppKit {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods = DEFAULT_METHODS,
-    RequestPublicationController? publication,
-    int? requestId,
   }) async {
     try {
       return await reOwnSign.connect(
@@ -190,8 +188,6 @@ class ReownAppKit implements IReownAppKit {
         relays: relays,
         authentication: authentication,
         methods: methods,
-        publication: publication,
-        requestId: requestId,
       );
     } catch (e) {
       // print(e);
@@ -202,7 +198,6 @@ class ReownAppKit implements IReownAppKit {
   @override
   Future<dynamic> request({
     int? requestId,
-    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
@@ -210,7 +205,6 @@ class ReownAppKit implements IReownAppKit {
     try {
       return await reOwnSign.request(
         requestId: requestId,
-        publication: publication,
         topic: topic,
         chainId: chainId,
         request: request,

@@ -19,8 +19,7 @@ import 'package:reown_core/utils/constants.dart';
 import 'package:reown_core/utils/errors.dart';
 import 'package:reown_core/version.dart';
 
-class RelayClient
-    implements IRelayClient, IAcknowledgedRelayClient, ICancellableRelayClient {
+class RelayClient implements IRelayClient, ICancellableRelayClient {
   static const IRN_PUBLISH = 'publish';
   static const IRN_SUBSCRIPTION = 'subscription';
   static const IRN_SUBSCRIBE = 'subscribe';
@@ -115,35 +114,22 @@ class RelayClient
     required String topic,
     required String message,
     required PublishOptions options,
-  }) async {
-    await publishAcknowledged(topic: topic, message: message, options: options);
-  }
-
-  /// Publishes a relay message and waits for the relay acknowledgement.
-  ///
-  /// Returns `true` only when the relay positively acknowledges `irn_publish`.
-  /// This does not mean that the wallet received or answered the request.
-  @override
-  Future<bool> publishAcknowledged({
-    required String topic,
-    required String message,
-    required PublishOptions options,
-  }) => _publishAcknowledged(topic: topic, message: message, options: options);
+  }) => _publish(topic: topic, message: message, options: options);
 
   @override
-  Future<bool> publishCancellable({
+  Future<void> publishCancellable({
     required String topic,
     required String message,
     required PublishOptions options,
     required RequestPublicationController publication,
-  }) => _publishAcknowledged(
+  }) => _publish(
     topic: topic,
     message: message,
     options: options,
     publication: publication,
   );
 
-  Future<bool> _publishAcknowledged({
+  Future<void> _publish({
     required String topic,
     required String message,
     required PublishOptions options,
@@ -160,7 +146,6 @@ class RelayClient
     core.logger.d('[$runtimeType] publish topic: $topic, $parameters');
 
     try {
-      publication?.throwIfCancelled();
       await messageTracker.recordMessageEvent(topic, message);
       final result = await _sendJsonRpcRequest(
         id: JsonRpcUtils.payloadId(entropy: 6),
@@ -169,18 +154,11 @@ class RelayClient
         publication: publication,
       );
       if (result == true) publication?.acknowledge();
-      return result == true;
-    } on RequestPublicationCancelled {
-      rethrow;
     } catch (e, s) {
-      if (e is TimeoutException &&
-          publication != null &&
-          !publication.hasStarted) {
-        rethrow;
-      }
       core.logger.e('[$runtimeType], publish: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
-      return false;
+      // Only a send that never started is known to be unsent.
+      if (publication != null && !publication.hasStarted) rethrow;
     }
   }
 
@@ -212,7 +190,6 @@ class RelayClient
     core.logger.d('[$runtimeType] publishPayload, $parameters');
 
     try {
-      publication?.throwIfCancelled();
       if (options.publishMethod == RelayClient.WC_PROPOSE_SESSION) {
         final topic = payload['pairingTopic'];
         final message = payload['sessionProposal'];
@@ -228,24 +205,14 @@ class RelayClient
         parameters: parameters,
         publication: publication,
       );
-      if (publication != null && !publication.hasStarted) {
-        publication.throwIfCancelled();
-        throw const ReownCoreError(
-          code: -1,
-          message: 'Relay publication did not start.',
-        );
+      // Unlike irn_publish, wc_* methods confirm with any successful result.
+      if (publication != null && publication.hasStarted && result != false) {
+        publication.acknowledge();
       }
-      // Sign 2.5 custom RPCs acknowledge with a successful JSON-RPC response;
-      // unlike irn_publish, their result is not constrained to boolean true.
-      // A local no-connection return never crosses beginSend and is not an ACK.
-      if (publication?.hasStarted == true && result != false) {
-        publication?.acknowledge();
-      }
-    } on RequestPublicationCancelled {
-      rethrow;
     } catch (e, s) {
       core.logger.e('[$runtimeType], publishPayload: $e, $s');
       onRelayClientError.broadcast(ErrorEvent(e));
+      // Only a send that never started is known to be unsent.
       if (publication != null && !publication.hasStarted) rethrow;
     }
   }
@@ -274,7 +241,7 @@ class RelayClient
         id: JsonRpcUtils.payloadId(entropy: 6),
         method: _buildIRNMethod(IRN_UNSUBSCRIBE),
         parameters: {'topic': topic, 'id': id},
-      ).timeout(const Duration(seconds: 5));
+      );
     } catch (e, s) {
       core.logger.e('[$runtimeType], unsubscribe: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
@@ -299,6 +266,8 @@ class RelayClient
 
   @override
   Future<void> disconnect() async {
+    _checkInitialized();
+
     core.logger.i('[$runtimeType]: Disconnecting from relay');
 
     await _disconnect();
@@ -307,39 +276,36 @@ class RelayClient
   /// PRIVATE FUNCTIONS ///
 
   Future<void> _connect({String? relayUrl}) async {
-    if (_connecting) return await _connectingFuture;
-    if (isConnected) return;
-
-    // Reserve the shared attempt before cleanup or connection can yield.
-    _connecting = true;
-    _connectingFuture = _connectRelay(relayUrl: relayUrl);
-    await _connectingFuture;
-  }
-
-  Future<void> _connectRelay({String? relayUrl}) async {
     core.logger.d(
       '[$runtimeType]: _connect $relayUrl, isConnected: $isConnected',
     );
+    if (isConnected) {
+      return;
+    }
 
     core.relayUrl = relayUrl ?? core.relayUrl;
     core.logger.i('[$runtimeType] Connecting to relay url ${core.relayUrl}');
 
-    try {
-      // If we have tried connecting to the relay before, disconnect
-      if (_active) {
-        await _disconnect();
-      }
+    // If we have tried connecting to the relay before, disconnect
+    if (_active) {
+      await _disconnect();
+    }
 
-      // Connect, then start the heartbeat.
-      await _createJsonRPCProvider();
+    try {
+      // Connect and track the connection progress, then start the heartbeat
+      _connectingFuture = _createJsonRPCProvider();
+      await _connectingFuture;
+      _connecting = false;
       _subscribeToHeartbeat();
+      //
     } on TimeoutException catch (e, s) {
       core.logger.e('[$runtimeType], _connect timeout: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent('Connection to relay timeout'));
+      _connecting = false;
+      _connect();
     } catch (e, s) {
       core.logger.e('[$runtimeType], _connect error: $e', stackTrace: s);
       onRelayClientError.broadcast(ErrorEvent(e));
-    } finally {
       _connecting = false;
     }
   }
@@ -361,6 +327,7 @@ class RelayClient
   }
 
   Future<void> _createJsonRPCProvider() async {
+    _connecting = true;
     _active = true;
     final signedJWT = await core.crypto.signJWT(core.relayUrl);
     core.logger.d('[$runtimeType]: Signed JWT: $signedJWT');
@@ -403,11 +370,8 @@ class RelayClient
 
     // When jsonRPC closes, emit the event
     _handledClose = false;
-    final peer = jsonRPC!;
-    peer.done.then((value) {
-      if (identical(jsonRPC, peer)) {
-        _handleRelayClose(socketHandler.closeCode, socketHandler.closeReason);
-      }
+    jsonRPC!.done.then((value) {
+      _handleRelayClose(socketHandler.closeCode, socketHandler.closeReason);
     });
 
     onRelayClientConnect.broadcast();
@@ -579,7 +543,6 @@ class RelayClient
     dynamic parameters,
     RequestPublicationController? publication,
   }) async {
-    publication?.throwIfCancelled();
     // If we are connected and we know it send the message!
     if (isConnected) {
       // Here so we dont return null
@@ -603,8 +566,8 @@ class RelayClient
       return null;
     }
 
-    // Keep this checkpoint next to the synchronous send. Preparation,
-    // persistence and reconnect may all have completed after local cancellation.
+    // No await between this mark and the send: what a cancel() or the expiry
+    // stops here is provably never sent.
     publication?.beginSend();
     return await jsonRPC!.sendRequest(method, parameters, id);
   }

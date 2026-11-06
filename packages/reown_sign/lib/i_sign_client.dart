@@ -50,8 +50,6 @@ abstract class IReownSignClient {
     List<Relay>? relays,
     List<SessionAuthRequestParams>? authentication,
     List<List<String>>? methods,
-    RequestPublicationController? publication,
-    int? requestId,
   });
   Future<PairingInfo> pair({required Uri uri});
   Future<ApproveResponse> approve({
@@ -82,8 +80,6 @@ abstract class IReownSignClient {
     required SessionEventParams event,
   });
   Future<dynamic> request({
-    int? requestId,
-    RequestPublicationController? publication,
     required String topic,
     required String chainId,
     required SessionRequestParams request,
