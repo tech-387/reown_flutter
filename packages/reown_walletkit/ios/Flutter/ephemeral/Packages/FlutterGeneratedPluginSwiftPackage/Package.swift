@@ -9,20 +9,20 @@ import PackageDescription
 let package = Package(
     name: "FlutterGeneratedPluginSwiftPackage",
     platforms: [
-        .iOS("13.0")
+        .iOS("15.0")
     ],
     products: [
         .library(name: "FlutterGeneratedPluginSwiftPackage", type: .static, targets: ["FlutterGeneratedPluginSwiftPackage"])
     ],
     dependencies: [
-        .package(name: "appcheck", path: "../.packages/appcheck-1.8.0"),
-        .package(name: "connectivity_plus", path: "../.packages/connectivity_plus-7.3.1"),
+        .package(name: "appcheck", path: "../.packages/appcheck-1.8.1"),
+        .package(name: "connectivity_plus", path: "../.packages/connectivity_plus-7.3.2"),
         .package(name: "flutter_secure_storage_darwin", path: "../.packages/flutter_secure_storage_darwin-0.3.2"),
         .package(name: "package_info_plus", path: "../.packages/package_info_plus-9.0.1"),
-        .package(name: "shared_preferences_foundation", path: "../.packages/shared_preferences_foundation-2.5.6"),
-        .package(name: "sqflite_darwin", path: "../.packages/sqflite_darwin-2.4.3+1"),
-        .package(name: "url_launcher_ios", path: "../.packages/url_launcher_ios-6.4.1"),
-        .package(name: "webview_flutter_wkwebview", path: "../.packages/webview_flutter_wkwebview-3.26.0"),
+        .package(name: "shared_preferences_foundation", path: "../.packages/shared_preferences_foundation-2.6.1"),
+        .package(name: "sqflite_darwin", path: "../.packages/sqflite_darwin-2.4.5"),
+        .package(name: "url_launcher_ios", path: "../.packages/url_launcher_ios-6.4.2"),
+        .package(name: "webview_flutter_wkwebview", path: "../.packages/webview_flutter_wkwebview-3.27.2"),
         .package(name: "FlutterFramework", path: "../.packages/FlutterFramework")
     ],
     targets: [
